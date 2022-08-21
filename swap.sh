@@ -4,7 +4,7 @@ echo "How many gigabytes do you want the swap to be?"
 read gbs
 echo "Are you sure?, if not, please cntrl + c right now!"
 
-sudo fallocate -l $gbs /$swapfile
+sudo fallocate -l $gbsG /$swapfile
 sudo chmod 600 /$swapfile
 sudo mkswap /$swapfile
 sudo swapon /$swapfile
