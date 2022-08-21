@@ -2,7 +2,6 @@ echo "What do you want the swapfile to be named?"
 read swapfile
 echo "How many gigabytes do you want the swap to be? MAKE SURE TO ADD A G AFTER IT!!!"
 read gbs
-echo "Are you sure?, if not, please cntrl + c right now!"
 
 fallocate -l $gbs /$swapfile
 chmod 600 /$swapfile
