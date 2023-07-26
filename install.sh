@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check if the correct number of arguments is provided
-if [ "$#" -ne 2 ]; then
-    echo "Usage: $0 <java_version> <paper_version>"
+if [ "$#" -ne 3 ]; then
+    echo "Usage: $0 <java_version> <paper_version> <server_port>"
     exit 1
 fi
 
@@ -54,9 +54,19 @@ mkdir -p "$server_install_dir"
 echo "Downloading Paper Minecraft server $2..."
 wget -q --show-progress "$paper_base_url" -O "$server_install_dir/server.jar"
 
+# Set up a start script for the server
+cat > "$server_install_dir/start.sh" << EOF
+#!/bin/bash
+cd "$server_install_dir"
+java -Xmx{{SERVER_MEMORY}} -Xms{{SERVER_MEMORY}} -jar server.jar --port {{SERVER_PORT}}
+EOF
+
+# Give execute permissions to the start script
+chmod +x "$server_install_dir/start.sh"
+
 # Print Paper Minecraft server version to verify installation
 echo "Paper Minecraft server $2 has been installed successfully."
 
-# Run the Pterodactyl installer (replace the URL with the correct one)
-echo "Running Pterodactyl installer..."
-bash <(curl -s https://pterodactyl-installer.example.com)
+# Run the second script and pass the SERVER_PORT value to it
+echo "Running the second script..."
+./monitor_connection.sh "$1" "$2" "$3"
