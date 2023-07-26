@@ -71,37 +71,28 @@ if [ $# -ne 4 ]; then
 fi
 
 java_version="$1"
-minecraft_versions="$2" # Multiple versions separated by spaces, e.g., "1.16.5 1.17.1"
+minecraft_version="$2"
 port="$3"
 memory="$4"
 
-# Install Java based on the provided version
 install_java "$java_version"
+install_paper_minecraft "$minecraft_version"
+show_rainbow_text &
+check_for_connection "$port"
 
-# Try installing each Minecraft version until one works
-for version in $minecraft_versions; do
-  install_paper_minecraft "$version"
-  show_rainbow_text &
-  check_for_connection "$port"
-
-  if [ $? -eq 0 ]; then
-    start_minecraft_server "$memory" &
-    while true; do
-      sleep 2m
-      check_for_connection "$port"
-      if [ $? -ne 0 ]; then
-        break
-      fi
-    done
+if [ $? -eq 0 ]; then
+  start_minecraft_server "$memory" &
+  while true; do
     sleep 2m
-    stop_minecraft_server
-    sleep 2m
-    exit 0
-  else
-    # Clean up and try the next version
-    rm -f paper.jar
-  fi
-done
-
-echo "Failed to start Minecraft server with any of the provided versions: $minecraft_versions"
-exit 1
+    check_for_connection "$port"
+    if [ $? -ne 0 ]; then
+      break
+    fi
+  done
+  sleep 2m
+  stop_minecraft_server
+  sleep 2m
+else
+  echo "Failed to start Minecraft server with the provided variables."
+  exit 1
+fi
