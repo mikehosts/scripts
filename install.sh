@@ -6,14 +6,14 @@ install_java() {
   # Add code here to install Java based on the provided version
   # For example, to install OpenJDK 11:
   if [[ "$java_version" == "11" ]]; then
-    apt-get update
-    apt-get install -y openjdk-11-jre-headless
+    sudo apt-get update
+    sudo apt-get install -y openjdk-11-jre-headless
   elif [[ "$java_version" == "8" ]]; then
-    apt-get update
-    apt-get install -y openjdk-8-jre-headless
+    sudo apt-get update
+    sudo apt-get install -y openjdk-8-jre-headless
   elif [[ "$java_version" == "17" ]]; then
-    apt-get update
-    apt-get install -y openjdk-17-jre-headless
+    sudo apt-get update
+    sudo apt-get install -y openjdk-17-jre-headless
   else
     echo "Unsupported Java version: $java_version"
     exit 1
@@ -25,7 +25,7 @@ install_paper_minecraft() {
   minecraft_version="$1"
   # Add code here to install Paper Minecraft based on the provided version
   # For example, to download Paper for the given version:
-  wget -O paper.jar "https://papermc.io/api/v2/projects/paper/versions/$minecraft_version/builds/latest/downloads/paper-$minecraft_version-latest.jar"
+  sudo wget -O /path/to/paper.jar "https://papermc.io/api/v2/projects/paper/versions/$minecraft_version/builds/latest/downloads/paper-$minecraft_version-latest.jar"
 }
 
 # Function to show "DuckHost.pro" in rainbow colors
