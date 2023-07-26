@@ -65,26 +65,29 @@ stop_minecraft_server() {
 }
 
 # Main script starts here
-if [ $# -ne 4 ]; then
-  echo "Usage: $0 java-ver mc-ver port memory"
+if [ ! -f "minecraft_vars.txt" ]; then
+  echo "Error: minecraft_vars.txt not found!"
   exit 1
 fi
 
-java_version="$1"
-minecraft_version="$2"
-port="$3"
-memory="$4"
+# Read the variables from the minecraft_vars.txt file
+source minecraft_vars.txt
 
-install_java "$java_version"
-install_paper_minecraft "$minecraft_version"
+if [ -z "$JAVA_VER" ] || [ -z "$MC_VER" ] || [ -z "$SERVER_PORT" ] || [ -z "$SERVER_MEMORY" ]; then
+  echo "Error: One or more variables not set in minecraft_vars.txt"
+  exit 1
+fi
+
+install_java "$JAVA_VER"
+install_paper_minecraft "$MC_VER"
 show_rainbow_text &
-check_for_connection "$port"
+check_for_connection "$SERVER_PORT"
 
 if [ $? -eq 0 ]; then
-  start_minecraft_server "$memory" &
+  start_minecraft_server "$SERVER_MEMORY" &
   while true; do
     sleep 2m
-    check_for_connection "$port"
+    check_for_connection "$SERVER_PORT"
     if [ $? -ne 0 ]; then
       break
     fi
