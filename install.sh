@@ -1,72 +1,107 @@
 #!/bin/bash
 
-# Check if the correct number of arguments is provided
-if [ "$#" -ne 3 ]; then
-    echo "Usage: $0 <java_version> <paper_version> <server_port>"
+# Function to install Java based on the specified version
+install_java() {
+  java_version="$1"
+  # Add code here to install Java based on the provided version
+  # For example, to install OpenJDK 11:
+  if [[ "$java_version" == "11" ]]; then
+    apt-get update
+    apt-get install -y openjdk-11-jre-headless
+  elif [[ "$java_version" == "8" ]]; then
+    apt-get update
+    apt-get install -y openjdk-8-jre-headless
+  elif [[ "$java_version" == "17" ]]; then
+    apt-get update
+    apt-get install -y openjdk-17-jre-headless
+  else
+    echo "Unsupported Java version: $java_version"
     exit 1
+  fi
+}
+
+# Function to install Paper Minecraft server based on the specified version
+install_paper_minecraft() {
+  minecraft_version="$1"
+  # Add code here to install Paper Minecraft based on the provided version
+  # For example, to download Paper for the given version:
+  wget -O paper.jar "https://papermc.io/api/v2/projects/paper/versions/$minecraft_version/builds/latest/downloads/paper-$minecraft_version-latest.jar"
+}
+
+# Function to show "DuckHost.pro" in rainbow colors
+show_rainbow_text() {
+  echo -e "\033[31mD\033[33mu\033[32mc\033[36mk\033[34mH\033[35mo\033[31ms\033[33mt\033[32m.\033[36mp\033[34mr\033[35mo"
+  sleep 1
+  echo -e "\033[31mD\033[33mu\033[32mc\033[36mk\033[34mH\033[35mo\033[31ms\033[33mt\033[32m.\033[36mp\033[34mr\033[35mo"
+  sleep 1
+  echo -e "\033[31mD\033[33mu\033[32mc\033[36mk\033[34mH\033[35mo\033[31ms\033[33mt\033[32m.\033[36mp\033[34mr\033[35mo"
+}
+
+# Function to check for incoming network connections on the specified port
+check_for_connection() {
+  port="$1"
+  while true; do
+    nc -z localhost "$port"
+    if [ $? -eq 0 ]; then
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# Function to start the Minecraft server with the specified memory
+start_minecraft_server() {
+  memory="$1"
+  # Add code here to start the Minecraft server using the previously installed version
+  # Example: You can use java to start the server
+  # For example, to start the server with 2GB memory allocation:
+  # java -Xmx2G -Xms2G -jar paper.jar nogui
+}
+
+# Function to stop the Minecraft server
+stop_minecraft_server() {
+  # Add code here to gracefully stop the Minecraft server using the "stop" command
+  screen -S minecraft -X stuff "stop^M" # (Note: ^M should be a literal Enter/Return character)
+}
+
+# Main script starts here
+if [ $# -ne 4 ]; then
+  echo "Usage: $0 java-ver mc-ver port memory"
+  exit 1
 fi
 
-# Define the base URL for downloading Java from AdoptOpenJDK
-java_base_url="https://github.com/AdoptOpenJDK/openjdk${1}-binaries/releases/latest/download/"
+java_version="$1"
+minecraft_versions="$2" # Multiple versions separated by spaces, e.g., "1.16.5 1.17.1"
+port="$3"
+memory="$4"
 
-# Define the filename of the downloaded Java archive
-java_archive="openjdk-${1}_linux-x64_bin.tar.gz"
+# Install Java based on the provided version
+install_java "$java_version"
 
-# Define the directory where Java will be installed
-java_install_dir="/opt/java"
+# Try installing each Minecraft version until one works
+for version in $minecraft_versions; do
+  install_paper_minecraft "$version"
+  show_rainbow_text &
+  check_for_connection "$port"
 
-# Create the Java installation directory if it doesn't exist
-mkdir -p "$java_install_dir"
+  if [ $? -eq 0 ]; then
+    start_minecraft_server "$memory" &
+    while true; do
+      sleep 2m
+      check_for_connection "$port"
+      if [ $? -ne 0 ]; then
+        break
+      fi
+    done
+    sleep 2m
+    stop_minecraft_server
+    sleep 2m
+    exit 0
+  else
+    # Clean up and try the next version
+    rm -f paper.jar
+  fi
+done
 
-# Download Java archive from AdoptOpenJDK
-echo "Downloading Java $1..."
-wget -q --show-progress "$java_base_url$java_archive" -P "$java_install_dir"
-
-# Extract Java archive
-echo "Extracting Java $1..."
-tar -xf "${java_install_dir}/${java_archive}" -C "$java_install_dir"
-
-# Rename the extracted directory to a generic name for easier referencing
-mv "${java_install_dir}/jdk-${1}" "${java_install_dir}/java"
-
-# Cleanup - remove the downloaded archive
-rm "${java_install_dir}/${java_archive}"
-
-# Set environment variables (optional, you can modify as needed)
-export JAVA_HOME="${java_install_dir}/java"
-export PATH="$PATH:$JAVA_HOME/bin"
-
-# Print Java version to verify installation
-java -version
-
-echo "Java $1 has been installed successfully."
-
-# Define the base URL for downloading Paper Minecraft server
-paper_base_url="https://papermc.io/api/v2/projects/paper/versions/${2}/builds/lastSuccessful/download/"
-
-# Define the directory where the Paper server will be installed
-server_install_dir="/opt/minecraft_server"
-
-# Create the server installation directory if it doesn't exist
-mkdir -p "$server_install_dir"
-
-# Download Paper Minecraft server jar
-echo "Downloading Paper Minecraft server $2..."
-wget -q --show-progress "$paper_base_url" -O "$server_install_dir/server.jar"
-
-# Set up a start script for the server
-cat > "$server_install_dir/start.sh" << EOF
-#!/bin/bash
-cd "$server_install_dir"
-java -Xmx{{SERVER_MEMORY}} -Xms{{SERVER_MEMORY}} -jar server.jar --port {{SERVER_PORT}}
-EOF
-
-# Give execute permissions to the start script
-chmod +x "$server_install_dir/start.sh"
-
-# Print Paper Minecraft server version to verify installation
-echo "Paper Minecraft server $2 has been installed successfully."
-
-# Run the second script and pass the SERVER_PORT value to it
-echo "Running the second script..."
-./monitor_connection.sh "$1" "$2" "$3"
+echo "Failed to start Minecraft server with any of the provided versions: $minecraft_versions"
+exit 1
