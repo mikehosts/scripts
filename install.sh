@@ -1,5 +1,5 @@
 #!/bin/bash
-
+apt install sudo -y
 # Function to install Java based on the specified version
 install_java() {
   java_version="$1"
