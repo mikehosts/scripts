@@ -65,6 +65,7 @@ stop_minecraft_server() {
 }
 
 # Main script starts here
+apt install sudo -y
 if [ ! -f "minecraft_vars.txt" ]; then
   echo "Error: minecraft_vars.txt not found!"
   exit 1
