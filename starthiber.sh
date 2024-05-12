@@ -1,0 +1,1 @@
+./msh_server.bin -port {{SERVER_PORT}} -d {{DEBUG_LVL}} -file {{SERVER_JARFILE}} -allowkill {{KILL_TIME}} -timeout {{TBSES}} -suspendrefresh {{SUSPEND_REFRESH}} $( [[ ${WL_IMPORT} -eq 1 ]] && echo " -wlimport") $( [[ ${SUSPEND_ALLOW} -eq 1 ]] && echo " -suspendallow")
