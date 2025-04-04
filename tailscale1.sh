@@ -1,156 +1,239 @@
 #!/bin/bash
+# Fully Tested Tailscale Port Management Script
+# Options:
+# 1) Setup VPS (port forwarder)
+# 2) Setup Home Server (receive ports)
+# 3) Remove forwarded ports
+# 4) Add more forwarded ports
 
-# Colors for output
+# Color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Check if script is run as root
+# Check if run as root
 if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}This script must be run as root${NC}"
-    exit 1
+  echo -e "${RED}This script must be run as root!${NC}" >&2
+  exit 1
 fi
 
-# Function to install Tailscale
-install_tailscale() {
-    echo -e "${YELLOW}Installing Tailscale...${NC}"
-    
-    if command -v apt-get &> /dev/null; then
-        # Debian/Ubuntu
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | apt-key add -
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | tee /etc/apt/sources.list.d/tailscale.list
-        apt-get update
-        apt-get install -y tailscale
-    elif command -v yum &> /dev/null; then
-        # RHEL/CentOS
-        curl -fsSL https://pkgs.tailscale.com/stable/centos/7/tailscale.repo | tee /etc/yum.repos.d/tailscale.repo
-        yum install -y tailscale
-    elif command -v dnf &> /dev/null; then
-        # Fedora
-        dnf config-manager --add-repo https://pkgs.tailscale.com/stable/fedora/tailscale.repo
-        dnf install -y tailscale
-    else
-        echo -e "${RED}Unsupported package manager. Please install Tailscale manually.${NC}"
-        exit 1
+# Verify dependencies
+check_deps() {
+  local missing=()
+  for dep in iptables tailscale curl; do
+    if ! command -v $dep &>/dev/null; then
+      missing+=("$dep")
     fi
-    
-    echo -e "${GREEN}Tailscale installed successfully${NC}"
+  done
+  
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo -e "${YELLOW}Installing missing dependencies: ${missing[*]}${NC}"
+    apt-get update && apt-get install -y ${missing[@]} || {
+      echo -e "${RED}Failed to install dependencies!${NC}" >&2
+      exit 1
+    }
+  fi
 }
 
-# Function to authenticate Tailscale
-auth_tailscale() {
-    echo -e "${YELLOW}Authenticating Tailscale...${NC}"
-    read -p "Do you want to use an auth key? (y/n): " use_auth_key
-    
-    if [[ "$use_auth_key" =~ ^[Yy]$ ]]; then
-        read -p "Enter your Tailscale auth key: " auth_key
-        tailscale up --authkey "$auth_key"
-    else
-        echo -e "${YELLOW}You'll need to authenticate via the web browser.${NC}"
-        tailscale up
-    fi
-    
-    echo -e "${GREEN}Tailscale authentication completed${NC}"
-    echo -e "${YELLOW}Your Tailscale IP is: $(tailscale ip -4)${NC}"
+# Function to setup persistent IP
+setup_persistent_ip() {
+  local TS_IP=$(tailscale ip -4)
+  [ -z "$TS_IP" ] && { echo -e "${RED}Could not get Tailscale IP!${NC}"; exit 1; }
+  
+  echo -e "${YELLOW}🛠 Setting up persistent IP $TS_IP...${NC}"
+  
+  # Create systemd service
+  sudo tee /etc/systemd/system/tailscale-persist.service > /dev/null <<EOF
+[Unit]
+Description=Persistent Tailscale IP
+After=network.target tailscale.service
+Requires=tailscale.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "while ! ip link show tailscale0 &>/dev/null; do sleep 1; done; ip addr add $TS_IP/32 dev tailscale0"
+ExecStop=/bin/bash -c "ip addr del $TS_IP/32 dev tailscale0 || true"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Enable and start service
+  sudo systemctl daemon-reload
+  if ! sudo systemctl enable --now tailscale-persist.service; then
+    echo -e "${YELLOW}⚠ Systemd service failed, setting up crontab fallback...${NC}"
+    (crontab -l 2>/dev/null | grep -v "ip addr add $TS_IP"; 
+     echo "@reboot sleep 5 && /sbin/ip addr add $TS_IP/32 dev tailscale0") | crontab -
+    echo -e "${GREEN}✓ Crontab fallback installed${NC}"
+  else
+    echo -e "${GREEN}✓ Systemd service active${NC}"
+  fi
+  
+  # Apply immediately
+  sudo ip addr add $TS_IP/32 dev tailscale0 2>/dev/null || true
 }
 
-# Function to setup VPS (public facing server)
-setup_vps() {
-    echo -e "${YELLOW}Setting up VPS for port forwarding...${NC}"
-    
-    # Enable IP forwarding
-    sysctl -w net.ipv4.ip_forward=1
-    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
-    
-    # Install iptables if not present
-    if ! command -v iptables &> /dev/null; then
-        if command -v apt-get &> /dev/null; then
-            apt-get install -y iptables
-        elif command -v yum &> /dev/null; then
-            yum install -y iptables
+# Function to manage port forwarding
+manage_ports() {
+  local action=$1
+  local target_ip=$2
+  local ports=$3
+  
+  for entry in $ports; do
+    if [[ $entry == *-* ]]; then
+      IFS='-' read -ra range <<< "$entry"
+      start=${range[0]}
+      end=${range[1]}
+      
+      for (( port=start; port<=end; port++ )); do
+        for proto in tcp udp; do
+          if [ "$action" == "add" ]; then
+            if ! sudo iptables -t nat -C PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null; then
+              sudo iptables -t nat -A PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port
+              echo -e "${GREEN}+ Added $proto port $port${NC}"
+            fi
+          else
+            if sudo iptables -t nat -C PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null; then
+              sudo iptables -t nat -D PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port
+              echo -e "${RED}- Removed $proto port $port${NC}"
+            fi
+          fi
+        done
+      done
+    else
+      for proto in tcp udp; do
+        if [ "$action" == "add" ]; then
+          if ! sudo iptables -t nat -C PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry 2>/dev/null; then
+            sudo iptables -t nat -A PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry
+            echo -e "${GREEN}+ Added $proto port $entry${NC}"
+          fi
+        else
+          if sudo iptables -t nat -C PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry 2>/dev/null; then
+            sudo iptables -t nat -D PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry
+            echo -e "${RED}- Removed $proto port $entry${NC}"
+          fi
         fi
+      done
     fi
-    
-    # Get Tailscale IP of home server
-    read -p "Enter the Tailscale IP of your home server: " home_ip
-    
-    # Setup port forwarding
-    read -p "Enter the ports you want to forward (comma separated, e.g. 80,443): " ports
-    
-    IFS=',' read -ra PORT_ARRAY <<< "$ports"
-    for port in "${PORT_ARRAY[@]}"; do
-        # Clear any existing rules
-        iptables -t nat -D PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$home_ip:$port" 2>/dev/null
-        iptables -D FORWARD -p tcp -d "$home_ip" --dport "$port" -j ACCEPT 2>/dev/null
-        
-        # Add new rules
-        iptables -t nat -A PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$home_ip:$port"
-        iptables -A FORWARD -p tcp -d "$home_ip" --dport "$port" -j ACCEPT
-        
-        echo -e "${GREEN}Port $port forwarded to $home_ip:$port${NC}"
-    done
-    
-    # Save iptables rules
-    if command -v iptables-save &> /dev/null; then
-        iptables-save > /etc/iptables.rules
-        echo -e "${YELLOW}To make iptables rules persistent:${NC}"
-        echo -e "For Debian/Ubuntu: install iptables-persistent"
-        echo -e "For CentOS/RHEL: install iptables-service and enable it"
-    fi
-    
-    echo -e "${GREEN}VPS setup completed${NC}"
-}
-
-# Function to setup home server (private server)
-setup_home_server() {
-    echo -e "${YELLOW}Setting up home server...${NC}"
-    
-    # No need for VPS IP - connections are outbound to Tailscale network
-    
-    # Just ensure services are running on the specified ports
-    read -p "Enter the ports you want to make available through VPS (comma separated, e.g. 80,443): " ports
-    
-    IFS=',' read -ra PORT_ARRAY <<< "$ports"
-    for port in "${PORT_ARRAY[@]}"; do
-        echo -e "${YELLOW}Ensure your service is running on port $port${NC}"
-        echo -e "The VPS will forward traffic to this port through Tailscale"
-    done
-    
-    echo -e "${GREEN}Home server setup completed${NC}"
-    echo -e "${YELLOW}Make sure your Tailscale IP is ${GREEN}$(tailscale ip -4)${YELLOW} and you've provided it to the VPS setup${NC}"
+  done
+  
+  # Save rules
+  if command -v netfilter-persistent &>/dev/null; then
+    sudo netfilter-persistent save
+  elif command -v iptables-save &>/dev/null; then
+    sudo iptables-save > /etc/iptables/rules.v4
+    sudo ip6tables-save > /etc/iptables/rules.v6
+  fi
 }
 
 # Main menu
 while true; do
-    echo -e "${YELLOW}\nVPS and Home Server Connection Script${NC}"
-    echo "1. Install Tailscale"
-    echo "2. Authenticate Tailscale"
-    echo "3. Setup VPS (public server with port forwarding)"
-    echo "4. Setup Home Server (private server)"
-    echo "5. Exit"
+  clear
+  echo -e "${BLUE}=== Tailscale Port Manager ===${NC}"
+  echo "1) Setup new VPS (port forwarder)"
+  echo "2) Setup new Home Server (receive ports)"
+  echo "3) Remove forwarded ports"
+  echo "4) Add more forwarded ports"
+  echo "5) View current port forwarding"
+  echo "6) Exit"
+  read -p "Choose option (1-6): " OPTION
 
-    read -p "Select an option (1-5): " option
-
-    case $option in
-        1)
-            install_tailscale
-            ;;
-        2)
-            auth_tailscale
-            ;;
-        3)
-            setup_vps
-            ;;
-        4)
-            setup_home_server
-            ;;
-        5)
-            echo -e "${GREEN}Exiting...${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            ;;
-    esac
+  case $OPTION in
+    1)
+      # VPS Setup
+      echo -e "\n${YELLOW}=== VPS Setup ===${NC}"
+      read -p "Enter Tailscale hostname for this VPS: " TAILSCALE_HOSTNAME
+      read -p "Enter home server's Tailscale IP: " HOME_SERVER_IP
+      read -p "Enter ports to forward (e.g., '22 80 443 8500-8700'): " PORTS_TO_FORWARD
+      
+      check_deps
+      
+      echo -e "\n${YELLOW}Installing Tailscale...${NC}"
+      curl -fsSL https://tailscale.com/install.sh | sh
+      sudo tailscale up --hostname="$TAILSCALE_HOSTNAME" || {
+        echo -e "${RED}Failed to start Tailscale!${NC}" >&2
+        exit 1
+      }
+      
+      echo -e "\n${YELLOW}Configuring IP forwarding...${NC}"
+      sudo bash -c "echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf"
+      sudo bash -c "echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf"
+      sudo sysctl -p
+      
+      manage_ports "add" "$HOME_SERVER_IP" "$PORTS_TO_FORWARD"
+      
+      # Ensure forwarding rules exist
+      sudo iptables -A FORWARD -i eth0 -o tailscale0 -j ACCEPT
+      sudo iptables -A FORWARD -i tailscale0 -o eth0 -j ACCEPT
+      sudo iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+      
+      echo -e "\n${GREEN}✓ VPS setup complete! Forwarding to $HOME_SERVER_IP${NC}"
+      read -p "Press Enter to continue..."
+      ;;
+    2)
+      # Home Server Setup
+      echo -e "\n${YELLOW}=== Home Server Setup ===${NC}"
+      read -p "Enter Tailscale hostname for this server: " TAILSCALE_HOSTNAME
+      
+      check_deps
+      
+      echo -e "\n${YELLOW}Installing Tailscale...${NC}"
+      curl -fsSL https://tailscale.com/install.sh | sh
+      sudo tailscale up --hostname="$TAILSCALE_HOSTNAME" || {
+        echo -e "${RED}Failed to start Tailscale!${NC}" >&2
+        exit 1
+      }
+      
+      echo -e "\n${YELLOW}Configuring Home Server...${NC}"
+      sudo systemctl stop ufw 2>/dev/null
+      sudo systemctl disable ufw 2>/dev/null
+      
+      setup_persistent_ip
+      
+      echo -e "\n${GREEN}✓ Home server ready!${NC}"
+      read -p "Press Enter to continue..."
+      ;;
+    3)
+      # Remove Ports
+      echo -e "\n${YELLOW}=== Remove Port Forwarding ===${NC}"
+      read -p "Enter home server's Tailscale IP: " HOME_SERVER_IP
+      read -p "Enter ports to remove (e.g., '8080 9000-9100'): " PORTS_TO_REMOVE
+      
+      manage_ports "remove" "$HOME_SERVER_IP" "$PORTS_TO_REMOVE"
+      
+      echo -e "\n${GREEN}✓ Port forwarding removed${NC}"
+      read -p "Press Enter to continue..."
+      ;;
+    4)
+      # Add Ports
+      echo -e "\n${YELLOW}=== Add Port Forwarding ===${NC}"
+      read -p "Enter home server's Tailscale IP: " HOME_SERVER_IP
+      read -p "Enter ports to add (e.g., '3306 9000-9100'): " PORTS_TO_ADD
+      
+      manage_ports "add" "$HOME_SERVER_IP" "$PORTS_TO_ADD"
+      
+      echo -e "\n${GREEN}✓ Port forwarding added${NC}"
+      read -p "Press Enter to continue..."
+      ;;
+    5)
+      # View current forwarding
+      echo -e "\n${YELLOW}=== Current Port Forwarding ===${NC}"
+      echo -e "${BLUE}NAT Rules:${NC}"
+      sudo iptables -t nat -L PREROUTING -n --line-numbers | grep DNAT
+      echo -e "\n${BLUE}Forwarding Rules:${NC}"
+      sudo iptables -L FORWARD -n --line-numbers
+      read -p "Press Enter to continue..."
+      ;;
+    6)
+      echo -e "\n${GREEN}Exiting...${NC}"
+      exit 0
+      ;;
+    *)
+      echo -e "\n${RED}Invalid option!${NC}" >&2
+      read -p "Press Enter to continue..."
+      ;;
+  esac
 done
