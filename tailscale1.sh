@@ -252,4 +252,9 @@ while true; do
       echo -e "\n${YELLOW}=== Current Port Forwarding ===${NC}"
       echo -e "${BLUE}NAT Rules:${NC}"
       sudo iptables -t nat -L PREROUTING -n --line-numbers | grep DNAT
-      echo -e "\n${
+      echo -e "\n${BLUE}Forwarding Rules:${NC}"
+      sudo iptables -L FORWARD -n --line-numbers
+      read -p "Press Enter to continue..."
+      ;;
+    6)
+      echo -e "\n${GREEN}Exiting...
