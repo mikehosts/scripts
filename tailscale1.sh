@@ -1,131 +1,31 @@
-#!/bin/bash
-# Fully Tested Tailscale Port Management Script
-# Options:
-# 1) Setup VPS (port forwarder)
-# 2) Setup Home Server (receive ports)
-# 3) Remove forwarded ports
-# 4) Add more forwarded ports
-
-# Color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Check if run as root
-if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}This script must be run as root!${NC}" >&2
-  exit 1
-fi
-
-# Verify dependencies
-check_deps() {
-  local missing=()
-  for dep in iptables tailscale curl; do
-    if ! command -v $dep &>/dev/null; then
-      missing+=("$dep")
-    fi
-  done
+# Function to enable IP forwarding
+enable_ip_forwarding() {
+  echo -e "${YELLOW}Enabling IP forwarding...${NC}"
   
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo -e "${YELLOW}Installing missing dependencies: ${missing[*]}${NC}"
-    apt-get update && apt-get install -y ${missing[@]} || {
-      echo -e "${RED}Failed to install dependencies!${NC}" >&2
-      exit 1
-    }
+  # Enable IPv4 forwarding
+  if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+    echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf
   fi
-}
-
-# Function to setup persistent IP
-setup_persistent_ip() {
-  local TS_IP=$(tailscale ip -4)
-  [ -z "$TS_IP" ] && { echo -e "${RED}Could not get Tailscale IP!${NC}"; exit 1; }
   
-  echo -e "${YELLOW}🛠 Setting up persistent IP $TS_IP...${NC}"
+  # Enable IPv6 forwarding
+  if ! grep -q "^net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
+    echo 'net.ipv6.conf.all.forwarding=1' | sudo tee -a /etc/sysctl.conf
+  fi
   
-  # Create systemd service
-  sudo tee /etc/systemd/system/tailscale-persist.service > /dev/null <<EOF
-[Unit]
-Description=Persistent Tailscale IP
-After=network.target tailscale.service
-Requires=tailscale.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c "while ! ip link show tailscale0 &>/dev/null; do sleep 1; done; ip addr add $TS_IP/32 dev tailscale0"
-ExecStop=/bin/bash -c "ip addr del $TS_IP/32 dev tailscale0 || true"
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # Enable and start service
-  sudo systemctl daemon-reload
-  if ! sudo systemctl enable --now tailscale-persist.service; then
-    echo -e "${YELLOW}⚠ Systemd service failed, setting up crontab fallback...${NC}"
-    (crontab -l 2>/dev/null | grep -v "ip addr add $TS_IP"; 
-     echo "@reboot sleep 5 && /sbin/ip addr add $TS_IP/32 dev tailscale0") | crontab -
-    echo -e "${GREEN}✓ Crontab fallback installed${NC}"
+  # Apply changes
+  sudo sysctl -p
+  
+  # Confirm that IP forwarding is enabled
+  if [[ $(sysctl net.ipv4.ip_forward | awk '{print $3}') -eq 1 ]]; then
+    echo -e "${GREEN}✓ IPv4 forwarding is enabled${NC}"
   else
-    echo -e "${GREEN}✓ Systemd service active${NC}"
+    echo -e "${RED}✗ Failed to enable IPv4 forwarding${NC}"
   fi
   
-  # Apply immediately
-  sudo ip addr add $TS_IP/32 dev tailscale0 2>/dev/null || true
-}
-
-# Function to manage port forwarding
-manage_ports() {
-  local action=$1
-  local target_ip=$2
-  local ports=$3
-  
-  for entry in $ports; do
-    if [[ $entry == *-* ]]; then
-      IFS='-' read -ra range <<< "$entry"
-      start=${range[0]}
-      end=${range[1]}
-      
-      for (( port=start; port<=end; port++ )); do
-        for proto in tcp udp; do
-          if [ "$action" == "add" ]; then
-            if ! sudo iptables -t nat -C PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null; then
-              sudo iptables -t nat -A PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port
-              echo -e "${GREEN}+ Added $proto port $port${NC}"
-            fi
-          else
-            if sudo iptables -t nat -C PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null; then
-              sudo iptables -t nat -D PREROUTING -p $proto --dport $port -j DNAT --to-destination $target_ip:$port
-              echo -e "${RED}- Removed $proto port $port${NC}"
-            fi
-          fi
-        done
-      done
-    else
-      for proto in tcp udp; do
-        if [ "$action" == "add" ]; then
-          if ! sudo iptables -t nat -C PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry 2>/dev/null; then
-            sudo iptables -t nat -A PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry
-            echo -e "${GREEN}+ Added $proto port $entry${NC}"
-          fi
-        else
-          if sudo iptables -t nat -C PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry 2>/dev/null; then
-            sudo iptables -t nat -D PREROUTING -p $proto --dport $entry -j DNAT --to-destination $target_ip:$entry
-            echo -e "${RED}- Removed $proto port $entry${NC}"
-          fi
-        fi
-      done
-    fi
-  done
-  
-  # Save rules
-  if command -v netfilter-persistent &>/dev/null; then
-    sudo netfilter-persistent save
-  elif command -v iptables-save &>/dev/null; then
-    sudo iptables-save > /etc/iptables/rules.v4
-    sudo ip6tables-save > /etc/iptables/rules.v6
+  if [[ $(sysctl net.ipv6.conf.all.forwarding | awk '{print $3}') -eq 1 ]]; then
+    echo -e "${GREEN}✓ IPv6 forwarding is enabled${NC}"
+  else
+    echo -e "${RED}✗ Failed to enable IPv6 forwarding${NC}"
   fi
 }
 
@@ -159,9 +59,7 @@ while true; do
       }
       
       echo -e "\n${YELLOW}Configuring IP forwarding...${NC}"
-      sudo bash -c "echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf"
-      sudo bash -c "echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf"
-      sudo sysctl -p
+      enable_ip_forwarding  # Call the function to enable IP forwarding
       
       manage_ports "add" "$HOME_SERVER_IP" "$PORTS_TO_FORWARD"
       
