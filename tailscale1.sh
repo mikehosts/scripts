@@ -1,144 +1,156 @@
 #!/bin/bash
 
-# Function to run a command and check the result
-run_command() {
-    command="$1"
-    output=$(eval "$command" 2>&1)
-    if [ $? -eq 0 ]; then
-        echo "$output"
-    else
-        echo "Error: $output"
-        return 1
-    fi
-}
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Function to install Tailscale if not already installed
+# Check if script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${RED}This script must be run as root${NC}"
+    exit 1
+fi
+
+# Function to install Tailscale
 install_tailscale() {
-    echo -e "\nChecking if Tailscale is installed..."
-    if ! command -v tailscale &>/dev/null; then
-        echo "Tailscale not found. Installing Tailscale..."
-        if [ -f /etc/debian_version ]; then
-            # Debian/Ubuntu-based system
-            curl -fsSL https://tailscale.com/install.sh | sh
-        elif [ -f /etc/redhat-release ]; then
-            # Red Hat-based system
-            curl -fsSL https://tailscale.com/install.sh | sh
-        else
-            echo "Unsupported OS for installation. Please install Tailscale manually."
-            exit 1
-        fi
+    echo -e "${YELLOW}Installing Tailscale...${NC}"
+    
+    if command -v apt-get &> /dev/null; then
+        # Debian/Ubuntu
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | apt-key add -
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | tee /etc/apt/sources.list.d/tailscale.list
+        apt-get update
+        apt-get install -y tailscale
+    elif command -v yum &> /dev/null; then
+        # RHEL/CentOS
+        curl -fsSL https://pkgs.tailscale.com/stable/centos/7/tailscale.repo | tee /etc/yum.repos.d/tailscale.repo
+        yum install -y tailscale
+    elif command -v dnf &> /dev/null; then
+        # Fedora
+        dnf config-manager --add-repo https://pkgs.tailscale.com/stable/fedora/tailscale.repo
+        dnf install -y tailscale
     else
-        echo "Tailscale is already installed."
+        echo -e "${RED}Unsupported package manager. Please install Tailscale manually.${NC}"
+        exit 1
     fi
-}
-
-# Setup Home Server
-setup_home_server() {
-    echo -e "\nSetting up the Home Server..."
-    read -p "Enter the hostname for your home server to use with Tailscale: " home_server_host
     
-    # Install Tailscale on Home Server if necessary
-    install_tailscale
-
-    # Start Tailscale on the Home Server
-    echo "Starting Tailscale on the Home Server with hostname '$home_server_host'..."
-    sudo tailscale up --hostname "$home_server_host"
-    echo "Home Server setup complete."
+    echo -e "${GREEN}Tailscale installed successfully${NC}"
 }
 
-# Setup VPS
+# Function to authenticate Tailscale
+auth_tailscale() {
+    echo -e "${YELLOW}Authenticating Tailscale...${NC}"
+    read -p "Do you want to use an auth key? (y/n): " use_auth_key
+    
+    if [[ "$use_auth_key" =~ ^[Yy]$ ]]; then
+        read -p "Enter your Tailscale auth key: " auth_key
+        tailscale up --authkey "$auth_key"
+    else
+        echo -e "${YELLOW}You'll need to authenticate via the web browser.${NC}"
+        tailscale up
+    fi
+    
+    echo -e "${GREEN}Tailscale authentication completed${NC}"
+    echo -e "${YELLOW}Your Tailscale IP is: $(tailscale ip -4)${NC}"
+}
+
+# Function to setup VPS (public facing server)
 setup_vps() {
-    echo -e "\nSetting up the VPS..."
-    read -p "Enter the Tailscale IP address of your Home Server: " home_server_tailscale_ip
-    read -p "Enter the hostname for your VPS to use with Tailscale: " vps_host
+    echo -e "${YELLOW}Setting up VPS for port forwarding...${NC}"
     
-    # Install Tailscale on VPS if necessary
-    install_tailscale
-
-    # Start Tailscale on the VPS
-    echo "Starting Tailscale on the VPS with hostname '$vps_host'..."
-    sudo tailscale up --hostname "$vps_host"
-    echo "VPS setup complete."
-}
-
-# Function to handle port forwarding for multiple ports and ranges via SSH
-add_port_forwarding() {
-    echo -e "\nAdding port forwarding on VPS via SSH..."
+    # Enable IP forwarding
+    sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
     
-    read -p "Enter the ports you want to forward on the VPS (comma-separated or range like 8200-8300): " ports_input
-    read -p "Enter the Tailscale IP address of your home server (VPS will forward to this): " home_server_tailscale_ip
-
-    # Parse the ports input (handle multiple ports and ranges)
-    IFS=',' read -ra ports <<< "$ports_input"  # Split by comma if user entered multiple ports
-    
-    for port in "${ports[@]}"; do
-        if [[ "$port" =~ "-" ]]; then
-            # Handle port range, e.g., 8200-8300
-            start_port=$(echo "$port" | cut -d '-' -f 1)
-            end_port=$(echo "$port" | cut -d '-' -f 2)
-            
-            # Loop through the range and add port forwarding for each port using SSH
-            for ((p=$start_port; p<=$end_port; p++)); do
-                echo "Forwarding port $p via SSH..."
-                command="ssh -f -N -L $p:$home_server_tailscale_ip:$p user@$home_server_tailscale_ip"
-                run_command "$command" && echo "Port $p forwarded from VPS to Home Server $home_server_tailscale_ip"
-            done
-        else
-            # Single port forwarding using SSH
-            port=$(echo "$port" | xargs)  # Remove extra spaces if any
-            echo "Forwarding port $port via SSH..."
-            command="ssh -f -N -L $port:$home_server_tailscale_ip:$port user@$home_server_tailscale_ip"
-            run_command "$command" && echo "Port $port forwarded from VPS to Home Server $home_server_tailscale_ip"
+    # Install iptables if not present
+    if ! command -v iptables &> /dev/null; then
+        if command -v apt-get &> /dev/null; then
+            apt-get install -y iptables
+        elif command -v yum &> /dev/null; then
+            yum install -y iptables
         fi
-    done
-}
-
-# Remove Port Forwarding on VPS (Terminate SSH Tunnel)
-remove_port_forwarding() {
-    echo -e "\nRemoving port forwarding on VPS..."
-    read -p "Enter the port you want to remove the forwarding for: " port
-
-    # Terminate the SSH Tunnel for the specified port (assumes you can kill the SSH session)
-    echo "Terminating the SSH tunnel for port $port..."
-    command="pkill -f 'ssh -f -N -L $port:$home_server_tailscale_ip:$port'"
-    run_command "$command" && echo "Port forwarding for port $port removed."
-}
-
-# Main Menu
-main_menu() {
-    while true; do
-        echo -e "\nTailscale Port Forwarding Management"
-        echo "1. Setup Home Server"
-        echo "2. Setup VPS"
-        echo "3. Add Port Forwarding"
-        echo "4. Remove Port Forwarding"
-        echo "5. Exit"
+    fi
+    
+    # Get Tailscale IP of home server
+    read -p "Enter the Tailscale IP of your home server: " home_ip
+    
+    # Setup port forwarding
+    read -p "Enter the ports you want to forward (comma separated, e.g. 80,443): " ports
+    
+    IFS=',' read -ra PORT_ARRAY <<< "$ports"
+    for port in "${PORT_ARRAY[@]}"; do
+        # Clear any existing rules
+        iptables -t nat -D PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$home_ip:$port" 2>/dev/null
+        iptables -D FORWARD -p tcp -d "$home_ip" --dport "$port" -j ACCEPT 2>/dev/null
         
-        read -p "Enter your choice (1-5): " choice
+        # Add new rules
+        iptables -t nat -A PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$home_ip:$port"
+        iptables -A FORWARD -p tcp -d "$home_ip" --dport "$port" -j ACCEPT
         
-        case $choice in
-            1)
-                setup_home_server
-                ;;
-            2)
-                setup_vps
-                ;;
-            3)
-                add_port_forwarding
-                ;;
-            4)
-                remove_port_forwarding
-                ;;
-            5)
-                echo "Exiting the script."
-                break
-                ;;
-            *)
-                echo "Invalid choice, please try again."
-                ;;
-        esac
+        echo -e "${GREEN}Port $port forwarded to $home_ip:$port${NC}"
     done
+    
+    # Save iptables rules
+    if command -v iptables-save &> /dev/null; then
+        iptables-save > /etc/iptables.rules
+        echo -e "${YELLOW}To make iptables rules persistent:${NC}"
+        echo -e "For Debian/Ubuntu: install iptables-persistent"
+        echo -e "For CentOS/RHEL: install iptables-service and enable it"
+    fi
+    
+    echo -e "${GREEN}VPS setup completed${NC}"
 }
 
-# Run the main menu
-main_menu
+# Function to setup home server (private server)
+setup_home_server() {
+    echo -e "${YELLOW}Setting up home server...${NC}"
+    
+    # No need for VPS IP - connections are outbound to Tailscale network
+    
+    # Just ensure services are running on the specified ports
+    read -p "Enter the ports you want to make available through VPS (comma separated, e.g. 80,443): " ports
+    
+    IFS=',' read -ra PORT_ARRAY <<< "$ports"
+    for port in "${PORT_ARRAY[@]}"; do
+        echo -e "${YELLOW}Ensure your service is running on port $port${NC}"
+        echo -e "The VPS will forward traffic to this port through Tailscale"
+    done
+    
+    echo -e "${GREEN}Home server setup completed${NC}"
+    echo -e "${YELLOW}Make sure your Tailscale IP is ${GREEN}$(tailscale ip -4)${YELLOW} and you've provided it to the VPS setup${NC}"
+}
+
+# Main menu
+while true; do
+    echo -e "${YELLOW}\nVPS and Home Server Connection Script${NC}"
+    echo "1. Install Tailscale"
+    echo "2. Authenticate Tailscale"
+    echo "3. Setup VPS (public server with port forwarding)"
+    echo "4. Setup Home Server (private server)"
+    echo "5. Exit"
+
+    read -p "Select an option (1-5): " option
+
+    case $option in
+        1)
+            install_tailscale
+            ;;
+        2)
+            auth_tailscale
+            ;;
+        3)
+            setup_vps
+            ;;
+        4)
+            setup_home_server
+            ;;
+        5)
+            echo -e "${GREEN}Exiting...${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            ;;
+    esac
+done
