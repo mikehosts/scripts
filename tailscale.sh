@@ -35,14 +35,13 @@ install_tailscale() {
 # Setup Home Server
 setup_home_server() {
     echo -e "\nSetting up the Home Server..."
-    read -p "Enter the IP address of the Tailscale server: " home_server_ip
-    read -p "Enter the hostname of your home server: " home_server_host
+    read -p "Enter the hostname for your home server to use with Tailscale: " home_server_host
     
     # Install Tailscale on Home Server if necessary
     install_tailscale
 
     # Start Tailscale on the Home Server
-    echo "Starting Tailscale on the Home Server..."
+    echo "Starting Tailscale on the Home Server with hostname '$home_server_host'..."
     sudo tailscale up --hostname "$home_server_host"
     echo "Home Server setup complete."
 }
@@ -50,32 +49,51 @@ setup_home_server() {
 # Setup VPS
 setup_vps() {
     echo -e "\nSetting up the VPS..."
-    read -p "Enter the IP address of the VPS: " vps_ip
-    read -p "Enter the hostname of your VPS: " vps_host
+    read -p "Enter the Tailscale IP address of your Home Server: " home_server_tailscale_ip
+    read -p "Enter the hostname for your VPS to use with Tailscale: " vps_host
     
     # Install Tailscale on VPS if necessary
     install_tailscale
 
     # Start Tailscale on the VPS
-    echo "Starting Tailscale on the VPS..."
+    echo "Starting Tailscale on the VPS with hostname '$vps_host'..."
     sudo tailscale up --hostname "$vps_host"
     echo "VPS setup complete."
 }
 
-# Add Port Forwarding
+# Function to handle port forwarding for multiple ports and ranges
 add_port_forwarding() {
     echo -e "\nAdding port forwarding on VPS..."
-    read -p "Enter the port you want to forward on the VPS: " port
-    read -p "Enter the IP address of your home server: " home_server_ip
-    read -p "Enter the hostname of your home server: " home_server_host
+    
+    read -p "Enter the ports you want to forward on the VPS (comma-separated or range like 8200-8300): " ports_input
+    read -p "Enter the Tailscale IP address of your home server (VPS will forward to this): " home_server_tailscale_ip
 
-    # Use Tailscale to forward the port
-    echo "Running Tailscale port-forward command..."
-    command="tailscale port-forward $port $home_server_ip:$port"
-    run_command "$command" && echo "Port forwarding set from VPS $port to Home Server $home_server_host:$home_server_ip"
+    # Parse the ports input (handle multiple ports and ranges)
+    IFS=',' read -ra ports <<< "$ports_input"  # Split by comma if user entered multiple ports
+    
+    for port in "${ports[@]}"; do
+        if [[ "$port" =~ "-" ]]; then
+            # Handle port range, e.g., 8200-8300
+            start_port=$(echo "$port" | cut -d '-' -f 1)
+            end_port=$(echo "$port" | cut -d '-' -f 2)
+            
+            # Loop through the range and add port forwarding for each port
+            for ((p=$start_port; p<=$end_port; p++)); do
+                echo "Forwarding port $p..."
+                command="tailscale port-forward $p $home_server_tailscale_ip:$p"
+                run_command "$command" && echo "Port forwarding set from VPS $p to Home Server $home_server_tailscale_ip"
+            done
+        else
+            # Single port forwarding
+            port=$(echo "$port" | xargs)  # Remove extra spaces if any
+            echo "Forwarding port $port..."
+            command="tailscale port-forward $port $home_server_tailscale_ip:$port"
+            run_command "$command" && echo "Port forwarding set from VPS $port to Home Server $home_server_tailscale_ip"
+        fi
+    done
 }
 
-# Remove Port Forwarding
+# Remove Port Forwarding on VPS
 remove_port_forwarding() {
     echo -e "\nRemoving port forwarding on VPS..."
     read -p "Enter the port you want to remove the forwarding for: " port
