@@ -28,35 +28,11 @@ enable_ip_forwarding() {
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 }
 
-add_forward_rule() {
-    read -rp "Enter Tailscale destination IP: " DEST_IP
-    read -rp "Enter ports to forward (e.g. 80,443,8000-8010): " PORTS
-    read -rp "Protocol (tcp/udp/both): " PROTO
-
-    LOCAL_TS_IP=$(tailscale ip -4)
-
-    IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
-    for port in "${PORT_ARRAY[@]}"; do
-        if [[ "$port" == *"-"* ]]; then
-            start=$(echo "$port" | cut -d'-' -f1)
-            end=$(echo "$port" | cut -d'-' -f2)
-            for ((p=start; p<=end; p++)); do
-                forward_port "$p" "$DEST_IP" "$PROTO" "$LOCAL_TS_IP"
-            done
-        else
-            forward_port "$port" "$DEST_IP" "$PROTO" "$LOCAL_TS_IP"
-        fi
-    done
-
-    netfilter-persistent save
-    echo "=== Port forwarding rule(s) added and saved ==="
-}
-
 forward_port() {
     local PORT="$1"
     local DEST="$2"
-    local PROTO="$3"
-    local LOCAL="$4"
+    local LOCAL="$3"
+    local PROTO="$4"
 
     case "$PROTO" in
         tcp)
@@ -68,13 +44,39 @@ forward_port() {
             iptables -A FORWARD -p udp -d "$DEST" --dport "$PORT" -j ACCEPT
             ;;
         both)
-            forward_port "$PORT" "$DEST" tcp "$LOCAL"
-            forward_port "$PORT" "$DEST" udp "$LOCAL"
+            forward_port "$PORT" "$DEST" "$LOCAL" tcp
+            forward_port "$PORT" "$DEST" "$LOCAL" udp
             ;;
         *)
             echo "Invalid protocol, skipping $PORT"
             ;;
     esac
+}
+
+add_forward_rule() {
+    read -rp "Enter Tailscale destination IP: " DEST_IP
+    read -rp "Enter ports to forward (e.g. 22,80,8000-8010): " PORTS
+    read -rp "Protocol (tcp/udp/both): " PROTO
+
+    LOCAL_TS_IP=$(tailscale ip -4)
+
+    IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
+    for port in "${PORT_ARRAY[@]}"; do
+        if [[ "$port" == *"-"* ]]; then
+            start=$(echo "$port" | cut -d'-' -f1)
+            end=$(echo "$port" | cut -d'-' -f2)
+            for ((p=start; p<=end; p++)); do
+                echo "Forwarding port $p ($PROTO) to $DEST_IP"
+                forward_port "$p" "$DEST_IP" "$LOCAL_TS_IP" "$PROTO"
+            done
+        else
+            echo "Forwarding port $port ($PROTO) to $DEST_IP"
+            forward_port "$port" "$DEST_IP" "$LOCAL_TS_IP" "$PROTO"
+        fi
+    done
+
+    netfilter-persistent save
+    echo "=== Port forwarding rule(s) added and saved ==="
 }
 
 view_rules() {
@@ -88,48 +90,58 @@ view_rules() {
 remove_rule() {
     read -rp "Enter port to remove: " PORT
     read -rp "Protocol (tcp/udp/both): " PROTO
+    read -rp "Destination Tailscale IP: " DEST_IP
     LOCAL_TS_IP=$(tailscale ip -4)
 
     case "$PROTO" in
-        tcp)
-            iptables -t nat -D PREROUTING -d "$LOCAL_TS_IP" -p tcp --dport "$PORT" -j DNAT --to-destination "$DEST_IP:$PORT" 2>/dev/null || true
-            iptables -D FORWARD -p tcp -d "$DEST_IP" --dport "$PORT" -j ACCEPT 2>/dev/null || true
-            ;;
-        udp)
-            iptables -t nat -D PREROUTING -d "$LOCAL_TS_IP" -p udp --dport "$PORT" -j DNAT --to-destination "$DEST_IP:$PORT" 2>/dev/null || true
-            iptables -D FORWARD -p udp -d "$DEST_IP" --dport "$PORT" -j ACCEPT 2>/dev/null || true
+        tcp|udp)
+            iptables -t nat -D PREROUTING -d "$LOCAL_TS_IP" -p "$PROTO" --dport "$PORT" -j DNAT --to-destination "$DEST_IP:$PORT" 2>/dev/null || true
+            iptables -D FORWARD -p "$PROTO" -d "$DEST_IP" --dport "$PORT" -j ACCEPT 2>/dev/null || true
             ;;
         both)
-            remove_rule_specific "$PORT" tcp "$LOCAL_TS_IP"
-            remove_rule_specific "$PORT" udp "$LOCAL_TS_IP"
+            remove_rule_single "$PORT" tcp "$DEST_IP" "$LOCAL_TS_IP"
+            remove_rule_single "$PORT" udp "$DEST_IP" "$LOCAL_TS_IP"
+            ;;
+        *)
+            echo "Invalid protocol"
             ;;
     esac
 
     netfilter-persistent save
-    echo "=== Port forwarding rule removed ==="
+    echo "=== Rule removed and saved ==="
 }
 
-remove_rule_specific() {
+remove_rule_single() {
     local PORT="$1"
     local PROTO="$2"
-    local LOCAL="$3"
-    iptables -t nat -D PREROUTING -d "$LOCAL" -p "$PROTO" --dport "$PORT" -j DNAT --to-destination "$DEST_IP:$PORT" 2>/dev/null || true
-    iptables -D FORWARD -p "$PROTO" -d "$DEST_IP" --dport "$PORT" -j ACCEPT 2>/dev/null || true
+    local DEST="$3"
+    local LOCAL="$4"
+    iptables -t nat -D PREROUTING -d "$LOCAL" -p "$PROTO" --dport "$PORT" -j DNAT --to-destination "$DEST:$PORT" 2>/dev/null || true
+    iptables -D FORWARD -p "$PROTO" -d "$DEST" --dport "$PORT" -j ACCEPT 2>/dev/null || true
 }
 
-# Ensure dependencies are installed and IP forwarding enabled
+delete_all_rules() {
+    echo "=== Deleting all port forwarding rules ==="
+    iptables -t nat -F PREROUTING
+    iptables -F FORWARD
+    netfilter-persistent save
+    echo "=== All rules deleted ==="
+}
+
+# Ensure dependencies and IP forwarding
 install_requirements
 enable_ip_forwarding
 
-# Main menu loop
+# Menu loop
 while true; do
     echo ""
     echo "==== Tailscale Port Forwarding Menu ===="
     echo "1) Install Tailscale"
     echo "2) Add new forwarding rule"
     echo "3) View current rules"
-    echo "4) Remove a rule"
-    echo "5) Exit"
+    echo "4) Remove a single rule"
+    echo "5) Delete all rules"
+    echo "6) Exit"
     read -rp "Choose an option: " CHOICE
 
     case $CHOICE in
@@ -137,7 +149,8 @@ while true; do
         2) add_forward_rule ;;
         3) view_rules ;;
         4) remove_rule ;;
-        5) exit 0 ;;
+        5) delete_all_rules ;;
+        6) exit 0 ;;
         *) echo "Invalid choice" ;;
     esac
 done
