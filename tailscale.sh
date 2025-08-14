@@ -10,55 +10,18 @@ fi
 install_requirements() {
     echo "=== Installing dependencies ==="
     apt-get update
-    apt-get install -y curl iptables iptables-persistent netfilter-persistent
-}
-
-install_tailscale() {
-    echo "=== Installing Tailscale ==="
-    curl -fsSL https://tailscale.com/install.sh | sh
-    tailscale up --accept-routes
-    echo "Please authenticate Tailscale in your browser..."
-    sleep 5
+    apt-get install -y iptables iptables-persistent netfilter-persistent
 }
 
 enable_ip_forwarding() {
     echo "=== Enabling IP forwarding ==="
     sysctl -w net.ipv4.ip_forward=1
-    sed -i '/^net.ipv4.ip_forward/d' /etc/sysctl.conf
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-}
-
-forward_port() {
-    local PORT="$1"
-    local DEST="$2"
-    local LOCAL="$3"
-    local PROTO="$4"
-
-    case "$PROTO" in
-        tcp)
-            iptables -t nat -A PREROUTING -d "$LOCAL" -p tcp --dport "$PORT" -j DNAT --to-destination "$DEST:$PORT"
-            iptables -A FORWARD -p tcp -d "$DEST" --dport "$PORT" -j ACCEPT
-            ;;
-        udp)
-            iptables -t nat -A PREROUTING -d "$LOCAL" -p udp --dport "$PORT" -j DNAT --to-destination "$DEST:$PORT"
-            iptables -A FORWARD -p udp -d "$DEST" --dport "$PORT" -j ACCEPT
-            ;;
-        both)
-            forward_port "$PORT" "$DEST" "$LOCAL" tcp
-            forward_port "$PORT" "$DEST" "$LOCAL" udp
-            ;;
-        *)
-            echo "Invalid protocol, skipping $PORT"
-            ;;
-    esac
+    grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 }
 
 add_forward_rule() {
-    read -rp "Enter Tailscale destination IP: " DEST_IP
-    read -rp "Enter ports to forward (e.g. 22,80,8000-8010): " PORTS
-    read -rp "Protocol (tcp/udp/both): " PROTO
-
-    LOCAL_TS_IP=$(tailscale ip -4)
+    read -rp "Enter Remote Server Tailscale IP: " REMOTE_IP
+    read -rp "Enter ports to forward (comma-separated or ranges, e.g. 22,80,8000-8010): " PORTS
 
     IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
     for port in "${PORT_ARRAY[@]}"; do
@@ -66,66 +29,41 @@ add_forward_rule() {
             start=$(echo "$port" | cut -d'-' -f1)
             end=$(echo "$port" | cut -d'-' -f2)
             for ((p=start; p<=end; p++)); do
-                echo "Forwarding port $p ($PROTO) to $DEST_IP"
-                forward_port "$p" "$DEST_IP" "$LOCAL_TS_IP" "$PROTO"
+                echo "Forwarding port $p → $REMOTE_IP:$p"
+                iptables -t nat -A PREROUTING -p tcp --dport "$p" -j DNAT --to-destination "$REMOTE_IP:$p"
+                iptables -A FORWARD -p tcp -d "$REMOTE_IP" --dport "$p" -j ACCEPT
+                iptables -t nat -A POSTROUTING -p tcp -d "$REMOTE_IP" --dport "$p" -j MASQUERADE
             done
         else
-            echo "Forwarding port $port ($PROTO) to $DEST_IP"
-            forward_port "$port" "$DEST_IP" "$LOCAL_TS_IP" "$PROTO"
+            echo "Forwarding port $port → $REMOTE_IP:$port"
+            iptables -t nat -A PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$REMOTE_IP:$port"
+            iptables -A FORWARD -p tcp -d "$REMOTE_IP" --dport "$port" -j ACCEPT
+            iptables -t nat -A POSTROUTING -p tcp -d "$REMOTE_IP" --dport "$port" -j MASQUERADE
         fi
     done
 
     netfilter-persistent save
-    echo "=== Port forwarding rule(s) added and saved ==="
+    echo "=== Port forwarding rules added and saved ==="
 }
 
 view_rules() {
-    echo "=== Current iptables NAT rules ==="
+    echo "=== NAT PREROUTING Rules ==="
     iptables -t nat -L PREROUTING -n -v
     echo ""
-    echo "=== Current iptables FORWARD rules ==="
+    echo "=== FORWARD Rules ==="
     iptables -L FORWARD -n -v
-}
-
-remove_rule() {
-    read -rp "Enter port to remove: " PORT
-    read -rp "Protocol (tcp/udp/both): " PROTO
-    read -rp "Destination Tailscale IP: " DEST_IP
-    LOCAL_TS_IP=$(tailscale ip -4)
-
-    case "$PROTO" in
-        tcp|udp)
-            iptables -t nat -D PREROUTING -d "$LOCAL_TS_IP" -p "$PROTO" --dport "$PORT" -j DNAT --to-destination "$DEST_IP:$PORT" 2>/dev/null || true
-            iptables -D FORWARD -p "$PROTO" -d "$DEST_IP" --dport "$PORT" -j ACCEPT 2>/dev/null || true
-            ;;
-        both)
-            remove_rule_single "$PORT" tcp "$DEST_IP" "$LOCAL_TS_IP"
-            remove_rule_single "$PORT" udp "$DEST_IP" "$LOCAL_TS_IP"
-            ;;
-        *)
-            echo "Invalid protocol"
-            ;;
-    esac
-
-    netfilter-persistent save
-    echo "=== Rule removed and saved ==="
-}
-
-remove_rule_single() {
-    local PORT="$1"
-    local PROTO="$2"
-    local DEST="$3"
-    local LOCAL="$4"
-    iptables -t nat -D PREROUTING -d "$LOCAL" -p "$PROTO" --dport "$PORT" -j DNAT --to-destination "$DEST:$PORT" 2>/dev/null || true
-    iptables -D FORWARD -p "$PROTO" -d "$DEST" --dport "$PORT" -j ACCEPT 2>/dev/null || true
+    echo ""
+    echo "=== NAT POSTROUTING Rules ==="
+    iptables -t nat -L POSTROUTING -n -v
 }
 
 delete_all_rules() {
     echo "=== Deleting all port forwarding rules ==="
     iptables -t nat -F PREROUTING
+    iptables -t nat -F POSTROUTING
     iptables -F FORWARD
     netfilter-persistent save
-    echo "=== All rules deleted ==="
+    echo "=== All forwarding rules deleted ==="
 }
 
 # Ensure dependencies and IP forwarding
@@ -135,22 +73,18 @@ enable_ip_forwarding
 # Menu loop
 while true; do
     echo ""
-    echo "==== Tailscale Port Forwarding Menu ===="
-    echo "1) Install Tailscale"
-    echo "2) Add new forwarding rule"
-    echo "3) View current rules"
-    echo "4) Remove a single rule"
-    echo "5) Delete all rules"
-    echo "6) Exit"
+    echo "==== VPN Server Port Forwarding Menu ===="
+    echo "1) Add new forwarding rule"
+    echo "2) View current rules"
+    echo "3) Delete all rules"
+    echo "4) Exit"
     read -rp "Choose an option: " CHOICE
 
     case $CHOICE in
-        1) install_tailscale ;;
-        2) add_forward_rule ;;
-        3) view_rules ;;
-        4) remove_rule ;;
-        5) delete_all_rules ;;
-        6) exit 0 ;;
+        1) add_forward_rule ;;
+        2) view_rules ;;
+        3) delete_all_rules ;;
+        4) exit 0 ;;
         *) echo "Invalid choice" ;;
     esac
 done
