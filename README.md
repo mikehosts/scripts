@@ -5,4 +5,4 @@ Swap:
 
 
 Tailscale:
->```bash <(curl -s [https://raw.githubusercontent.com/mikehosts/scripts/main/tailscale.sh]```
+>```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/main/tailscale.sh)```
