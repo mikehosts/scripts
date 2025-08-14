@@ -10,13 +10,24 @@ fi
 install_requirements() {
     echo "=== Installing dependencies ==="
     apt-get update
-    apt-get install -y iptables iptables-persistent netfilter-persistent
+    apt-get install -y iptables iptables-persistent netfilter-persistent curl gnupg lsb-release
 }
 
 enable_ip_forwarding() {
     echo "=== Enabling IP forwarding ==="
     sysctl -w net.ipv4.ip_forward=1
     grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+}
+
+install_tailscale() {
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale is already installed."
+        tailscale version
+    else
+        echo "=== Installing Tailscale ==="
+        curl -fsSL https://tailscale.com/install.sh | sh
+        echo "Tailscale installed. You can start it with: sudo tailscale up"
+    fi
 }
 
 add_forward_rule() {
@@ -69,22 +80,25 @@ delete_all_rules() {
 # Ensure dependencies and IP forwarding
 install_requirements
 enable_ip_forwarding
+install_tailscale
 
 # Menu loop
 while true; do
     echo ""
     echo "==== VPN Server Port Forwarding Menu ===="
-    echo "1) Add new forwarding rule"
-    echo "2) View current rules"
-    echo "3) Delete all rules"
-    echo "4) Exit"
+    echo "1) Install or check Tailscale"
+    echo "2) Add new forwarding rule"
+    echo "3) View current rules"
+    echo "4) Delete all rules"
+    echo "5) Exit"
     read -rp "Choose an option: " CHOICE
 
     case $CHOICE in
-        1) add_forward_rule ;;
-        2) view_rules ;;
-        3) delete_all_rules ;;
-        4) exit 0 ;;
+        1) install_tailscale ;;
+        2) add_forward_rule ;;
+        3) view_rules ;;
+        4) delete_all_rules ;;
+        5) exit 0 ;;
         *) echo "Invalid choice" ;;
     esac
 done
