@@ -6,3 +6,7 @@ Swap:
 
 Tailscale:
 >```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/main/tailscale.sh)```
+
+
+Monitor:
+```https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/monitor.sh```
