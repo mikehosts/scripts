@@ -4,6 +4,7 @@
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # --- Check for Root Privileges ---
@@ -15,6 +16,7 @@ fi
 
 # --- Function to Install Dependencies ---
 install_dependencies() {
+    ROLE=$1
     echo -e "${YELLOW}Updating package lists...${NC}"
     apt-get update -y > /dev/null 2>&1
 
@@ -22,12 +24,14 @@ install_dependencies() {
     apt-get install -y python3 python3-pip > /dev/null 2>&1
 
     echo -e "${YELLOW}Installing required Python libraries...${NC}"
-    pip3 install flask requests psutil py-cpuinfo > /dev/null 2>&1
+    if [ "$ROLE" == "master" ]; then
+        pip3 install flask discord.py > /dev/null 2>&1
+    fi
+    pip3 install requests psutil py-cpuinfo > /dev/null 2>&1
     echo -e "${GREEN}Dependencies installed successfully.${NC}"
 }
 
 # --- Determine User and Working Directory ---
-# If script is run with sudo, SUDO_USER will be the original user
 if [ -n "$SUDO_USER" ]; then
     RUN_USER=$SUDO_USER
 else
@@ -36,7 +40,7 @@ fi
 WORK_DIR=$(pwd)
 
 # --- Main Setup Logic ---
-echo -e "${GREEN}--- Ubuntu Server Monitoring Setup ---${NC}"
+echo -e "${GREEN}--- Ubuntu Server Monitoring Bot Setup ---${NC}"
 echo "This script will configure the server as either a master or a slave."
 read -p "Is this a 'master' or a 'slave' server? " ROLE
 
@@ -45,59 +49,133 @@ ROLE=$(echo "$ROLE" | tr '[:upper:]' '[:lower:]') # Convert to lowercase
 if [ "$ROLE" == "master" ]; then
     # --- MASTER SETUP ---
     echo -e "\n${YELLOW}--- Configuring Master Server ---${NC}"
-    install_dependencies
+    install_dependencies "master"
 
     read -p "Enter the IP address for the master to listen on [0.0.0.0]: " HOST_IP
     HOST_IP=${HOST_IP:-0.0.0.0}
 
     read -p "Enter the port for the master to listen on [5000]: " HOST_PORT
     HOST_PORT=${HOST_PORT:-5000}
-
-    read -p "Enter your Discord Webhook URL: " DISCORD_WEBHOOK_URL
+    
+    echo -e "\n${CYAN}You need a Discord Bot Token and a Channel ID.${NC}"
+    echo -e "${CYAN}1. Get a Token: Go to the Discord Developer Portal -> New Application -> Bot -> Reset Token.${NC}"
+    echo -e "${CYAN}2. Get a Channel ID: In Discord, enable Developer Mode (User Settings -> Advanced), then right-click a channel -> Copy Channel ID.${NC}"
+    echo -e "${CYAN}3. Invite the bot to your server (OAuth2 -> URL Generator). It needs 'Send Messages' and 'Read Message History' permissions.${NC}"
+    read -p "Enter your Discord Bot Token: " BOT_TOKEN
+    read -p "Enter the Discord Channel ID for updates: " CHANNEL_ID
 
     # Create the Python script for the master
     cat << EOF > ${WORK_DIR}/master.py
+import discord
+import asyncio
 from flask import Flask, request, jsonify
-import requests
+import threading
 import json
 import time
-
-app = Flask(__name__)
+import os
 
 # --- CONFIGURATION ---
-DISCORD_WEBHOOK_URL = "${DISCORD_WEBHOOK_URL}"
+BOT_TOKEN = "${BOT_TOKEN}"
+CHANNEL_ID = ${CHANNEL_ID}
+HOST_IP = "${HOST_IP}"
+HOST_PORT = ${HOST_PORT}
 # ---------------------
+
+# --- State Management ---
+STATE_FILE = "message_ids.json"
+slave_message_map = {}
+
+def load_state():
+    global slave_message_map
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            slave_message_map = json.load(f)
+    print(f"Loaded state: {len(slave_message_map)} slaves tracked.")
+
+def save_state():
+    with open(STATE_FILE, 'w') as f:
+        json.dump(slave_message_map, f, indent=4)
+
+# --- Discord Bot Setup ---
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+update_queue = asyncio.Queue()
+
+# --- Flask App (runs in a separate thread) ---
+app = Flask(__name__)
 
 @app.route('/update', methods=['POST'])
 def update():
     data = request.json
-    if not data:
-        return jsonify({"status": "error", "message": "No data received"}), 400
+    if not data or 'name' not in data:
+        return jsonify({"status": "error", "message": "Invalid data"}), 400
+    
+    client.loop.call_soon_threadsafe(update_queue.put_nowait, data)
+    return jsonify({"status": "success", "message": "Data queued for update"}), 200
 
+def run_flask():
+    app.run(host=HOST_IP, port=HOST_PORT)
+
+# --- Discord Bot Logic ---
+async def update_processor():
+    await client.wait_until_ready()
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print(f"ERROR: Cannot find channel with ID {CHANNEL_ID}. Please check the ID and the bot's permissions.")
+        return
+
+    print("Update processor is running.")
+    while not client.is_closed():
+        data = await update_queue.get()
+        slave_name = data.get('name')
+
+        embed = discord.Embed(
+            title=f"📊 Status Update for {slave_name}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="IP Address", value=data.get('ip', 'N/A'), inline=True)
+        embed.add_field(name="CPU", value=f"{data.get('cpu_make', 'N/A')}", inline=False)
+        embed.add_field(name="CPU Details", value=f"{data.get('cpu_ghz', 'N/A')} GHz | {data.get('cpu_threads', 'N/A')} Threads", inline=True)
+        embed.add_field(name="CPU Usage", value=f"**{data.get('cpu_usage', 0)}%**", inline=True)
+        embed.add_field(name="RAM Usage", value=f"{data.get('ram_usage', 0)}%", inline=True)
+        embed.add_field(name="Swap Usage", value=f"{data.get('swap_usage', 0)}%", inline=True)
+        embed.add_field(name="Disk Usage", value=f"{data.get('disk_usage', 0)}%", inline=True)
+        embed.set_footer(text=f"Last updated: {time.ctime()}")
+        
+        message_id = slave_message_map.get(slave_name)
+        
+        try:
+            if message_id:
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=embed)
+            else:
+                raise discord.NotFound(None, "No message ID in local map")
+        except discord.NotFound:
+            print(f"Message for {slave_name} not found. Sending a new one.")
+            new_message = await channel.send(embed=embed)
+            slave_message_map[slave_name] = new_message.id
+            save_state()
+        except Exception as e:
+            print(f"An error occurred while updating message for {slave_name}: {e}")
+
+@client.event
+async def on_ready():
+    print(f'Logged in as {client.user}')
+    load_state()
+    client.loop.create_task(update_processor())
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
     try:
-        embed = {
-            "title": f"📊 Status Update for {data.get('name', 'N/A')}",
-            "color": 3447003,
-            "fields": [
-                {"name": "IP Address", "value": data.get('ip', 'N/A'), "inline": True},
-                {"name": "CPU", "value": f"{data.get('cpu_make', 'N/A')}", "inline": False},
-                {"name": "CPU Details", "value": f"{data.get('cpu_ghz', 'N/A')} GHz | {data.get('cpu_threads', 'N/A')} Threads", "inline": True},
-                {"name": "CPU Usage", "value": f"**{data.get('cpu_usage', 0)}%**", "inline": True},
-                {"name": "RAM Usage", "value": f"{data.get('ram_usage', 0)}%", "inline": True},
-                {"name": "Swap Usage", "value": f"{data.get('swap_usage', 0)}%", "inline": True},
-                {"name": "Disk Usage", "value": f"{data.get('disk_usage', 0)}%", "inline": True},
-            ],
-            "footer": {"text": f"Last updated: {time.ctime()}"}
-        }
-        payload = {"embeds": [embed]}
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        return jsonify({"status": "success"}), 200
+        client.run(BOT_TOKEN)
+    except discord.errors.LoginFailure:
+        print("FATAL ERROR: Login failed. The bot token is invalid.")
     except Exception as e:
-        print(f"Error processing request: {e}")
-        return jsonify({"status": "error", "message": "Internal server error"}), 500
-
-if __name__ == '__main__':
-    app.run(host='${HOST_IP}', port=${HOST_PORT})
+        print(f"An error occurred while running the bot: {e}")
 EOF
     echo -e "${GREEN}Master Python script created at ${WORK_DIR}/master.py${NC}"
     
@@ -105,7 +183,7 @@ EOF
     SERVICE_NAME="master_monitor.service"
     cat << EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
-Description=Master Monitoring API
+Description=Master Monitoring Bot
 After=network.target
 
 [Service]
@@ -119,9 +197,9 @@ WantedBy=multi-user.target
 EOF
 
 elif [ "$ROLE" == "slave" ]; then
-    # --- SLAVE SETUP ---
+    # --- SLAVE SETUP (remains the same) ---
     echo -e "\n${YELLOW}--- Configuring Slave Server ---${NC}"
-    install_dependencies
+    install_dependencies "slave"
 
     read -p "Enter a name for this slave server [My Web Server]: " SLAVE_NAME
     SLAVE_NAME=${SLAVE_NAME:-My Web Server}
@@ -138,7 +216,6 @@ elif [ "$ROLE" == "slave" ]; then
     read -p "How often (in seconds) should this slave send updates? [60]: " UPDATE_INTERVAL
     UPDATE_INTERVAL=${UPDATE_INTERVAL:-60}
 
-    # Create the Python script for the slave
     cat << EOF > ${WORK_DIR}/slave.py
 import psutil
 import requests
@@ -175,25 +252,20 @@ def get_system_info():
         "disk_usage": psutil.disk_usage('/').percent,
     }
 
-def send_data(data):
+def send_data():
     try:
-        response = requests.post(MASTER_API_URL, json=data, timeout=10)
-        if response.status_code == 200:
-            print(f"[{time.ctime()}] Data sent successfully")
-        else:
-            print(f"[{time.ctime()}] Failed to send data: {response.status_code} - {response.text}")
+        response = requests.post(MASTER_API_URL, json=get_system_info(), timeout=10)
+        print(f"[{time.ctime()}] Status: {response.status_code} - {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"[{time.ctime()}] Error sending data: {e}")
 
 if __name__ == '__main__':
     while True:
-        system_info = get_system_info()
-        send_data(system_info)
+        send_data()
         time.sleep(UPDATE_INTERVAL)
 EOF
     echo -e "${GREEN}Slave Python script created at ${WORK_DIR}/slave.py${NC}"
 
-    # Create systemd service file
     SERVICE_NAME="slave_monitor.service"
     cat << EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
@@ -219,11 +291,11 @@ fi
 echo -e "\n${YELLOW}Creating and enabling systemd service...${NC}"
 systemctl daemon-reload
 systemctl enable ${SERVICE_NAME}
-systemctl start ${SERVICE_NAME}
+systemctl restart ${SERVICE_NAME} # Using restart to ensure any old versions are stopped
 
 echo -e "\n${GREEN}--- ✅ Setup Complete! ---${NC}"
 echo "The ${ROLE} service has been started and enabled to run on boot."
 echo "You can check its status with the command:"
 echo -e "${YELLOW}sudo systemctl status ${SERVICE_NAME}${NC}"
-echo "You can view its logs with the command:"
+echo "You can view its live logs with the command:"
 echo -e "${YELLOW}sudo journalctl -u ${SERVICE_NAME} -f${NC}"
