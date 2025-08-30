@@ -9,4 +9,4 @@ Tailscale:
 
 
 Monitor:
-```https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/monitor.sh```
+```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/monitor.sh)```
