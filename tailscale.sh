@@ -40,32 +40,51 @@ add_forward_rule() {
             start=$(echo "$port" | cut -d'-' -f1)
             end=$(echo "$port" | cut -d'-' -f2)
             for ((p=start; p<=end; p++)); do
-                echo "Forwarding port $p → $REMOTE_IP:$p"
+                echo "Forwarding TCP port $p → $REMOTE_IP:$p"
                 iptables -t nat -A PREROUTING -p tcp --dport "$p" -j DNAT --to-destination "$REMOTE_IP:$p"
                 iptables -A FORWARD -p tcp -d "$REMOTE_IP" --dport "$p" -j ACCEPT
                 iptables -t nat -A POSTROUTING -p tcp -d "$REMOTE_IP" --dport "$p" -j MASQUERADE
+                
+                echo "Forwarding UDP port $p → $REMOTE_IP:$p"
+                iptables -t nat -A PREROUTING -p udp --dport "$p" -j DNAT --to-destination "$REMOTE_IP:$p"
+                iptables -A FORWARD -p udp -d "$REMOTE_IP" --dport "$p" -j ACCEPT
+                iptables -t nat -A POSTROUTING -p udp -d "$REMOTE_IP" --dport "$p" -j MASQUERADE
             done
         else
-            echo "Forwarding port $port → $REMOTE_IP:$port"
+            echo "Forwarding TCP port $port → $REMOTE_IP:$port"
             iptables -t nat -A PREROUTING -p tcp --dport "$port" -j DNAT --to-destination "$REMOTE_IP:$port"
             iptables -A FORWARD -p tcp -d "$REMOTE_IP" --dport "$port" -j ACCEPT
             iptables -t nat -A POSTROUTING -p tcp -d "$REMOTE_IP" --dport "$port" -j MASQUERADE
+            
+            echo "Forwarding UDP port $port → $REMOTE_IP:$port"
+            iptables -t nat -A PREROUTING -p udp --dport "$port" -j DNAT --to-destination "$REMOTE_IP:$port"
+            iptables -A FORWARD -p udp -d "$REMOTE_IP" --dport "$port" -j ACCEPT
+            iptables -t nat -A POSTROUTING -p udp -d "$REMOTE_IP" --dport "$port" -j MASQUERADE
         fi
     done
 
     netfilter-persistent save
-    echo "=== Port forwarding rules added and saved ==="
+    echo "=== Port forwarding rules (TCP & UDP) added and saved ==="
 }
 
 view_rules() {
-    echo "=== NAT PREROUTING Rules ==="
-    iptables -t nat -L PREROUTING -n -v
+    echo "=== NAT PREROUTING Rules (TCP) ==="
+    iptables -t nat -L PREROUTING -n -v | grep -E "(tcp|dpt:)"
     echo ""
-    echo "=== FORWARD Rules ==="
-    iptables -L FORWARD -n -v
+    echo "=== NAT PREROUTING Rules (UDP) ==="
+    iptables -t nat -L PREROUTING -n -v | grep -E "(udp|dpt:)"
     echo ""
-    echo "=== NAT POSTROUTING Rules ==="
-    iptables -t nat -L POSTROUTING -n -v
+    echo "=== FORWARD Rules (TCP) ==="
+    iptables -L FORWARD -n -v | grep -E "(tcp|dpt:)"
+    echo ""
+    echo "=== FORWARD Rules (UDP) ==="
+    iptables -L FORWARD -n -v | grep -E "(udp|dpt:)"
+    echo ""
+    echo "=== NAT POSTROUTING Rules (TCP) ==="
+    iptables -t nat -L POSTROUTING -n -v | grep -E "(tcp|dpt:)"
+    echo ""
+    echo "=== NAT POSTROUTING Rules (UDP) ==="
+    iptables -t nat -L POSTROUTING -n -v | grep -E "(udp|dpt:)"
 }
 
 delete_all_rules() {
@@ -87,7 +106,7 @@ while true; do
     echo ""
     echo "==== VPN Server Port Forwarding Menu ===="
     echo "1) Install or check Tailscale"
-    echo "2) Add new forwarding rule"
+    echo "2) Add new forwarding rule (TCP & UDP)"
     echo "3) View current rules"
     echo "4) Delete all rules"
     echo "5) Exit"
