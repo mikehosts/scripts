@@ -1,13 +1,13 @@
 #!/bin/sh
 
-# Create private folder if it doesn't exist
+# 1. Make private folder
 mkdir -p /home/container/private
 
-# Download the JAR file (follow redirects)
+# 2. Download the JAR
 curl -L https://freezehost.pro/MSHJava.jar -o /home/container/private/MSHJava.jar
 
-# Set permissions: file readable only by server process, folder private
+# 3. Set permissions
 chmod 600 /home/container/private/MSHJava.jar
 chmod 700 /home/container/private
 
-echo "Download complete and permissions set."
+echo "Download complete!"
