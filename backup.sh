@@ -162,9 +162,18 @@ fi
 # Analysis Phase & ETA Calculation
 # ==============================================================================
 log "Analyzing source data. This may take a moment for millions of files..."
-FILE_COUNT=$(find "$SOURCE_DIR" -type f | wc -l)
-DIR_COUNT=$(find "$SOURCE_DIR" -type d | wc -l)
-SOURCE_KB=$(du -sk "$SOURCE_DIR" | cut -f1)
+
+# Turn off strict error checking temporarily. Active Pterodactyl nodes have ephemeral 
+# files (like Docker volumes) that disappear during analysis and will crash `du` or `find`.
+set +e
+FILE_COUNT=$(find "$SOURCE_DIR" -type f 2>/dev/null | wc -l)
+DIR_COUNT=$(find "$SOURCE_DIR" -type d 2>/dev/null | wc -l)
+SOURCE_KB=$(du -sk "$SOURCE_DIR" 2>/dev/null | cut -f1)
+set -e
+
+# Failsafe in case SOURCE_KB returns completely empty
+SOURCE_KB=${SOURCE_KB:-1}
+
 SOURCE_GB=$(echo "scale=2; $SOURCE_KB / 1024 / 1024" | bc)
 NAS_KB_FREE=$(df -P "$NAS_MOUNT" | awk 'NR==2 {print $4}')
 NAS_GB_FREE=$(echo "scale=2; $NAS_KB_FREE / 1024 / 1024" | bc)
