@@ -142,7 +142,7 @@ sed -i '\#ptero_nas#d' /etc/fstab
 echo "//$NAS_HOST/$NAS_SHARE $NAS_MOUNT cifs vers=$SMB_VERSION,credentials=$CRED_FILE,iocharset=utf8,noperm 0 0" >> /etc/fstab
 
 # Setup Sync Target Directory
-NAS_FOLDER=$(echo "$NAS_FOLDER" | sed -e 's/^\/*//' -e 's/\/*$//') # Strip leading/trailing slashes
+NAS_FOLDER=$(echo "$NAS_FOLDER" | sed -e 's/^\/*//' -e 's/\/*$//')
 if [[ -n "$NAS_FOLDER" ]]; then
     SYNC_TARGET="$NAS_MOUNT/$NAS_FOLDER"
     log "Creating target folder on NAS: $NAS_FOLDER"
@@ -159,7 +159,7 @@ if [[ -d "$SYNC_TARGET" ]] && [[ -n "$(ls -A "$SYNC_TARGET" 2>/dev/null)" ]]; th
 fi
 
 # ==============================================================================
-# Analysis Phase
+# Analysis Phase & ETA Calculation
 # ==============================================================================
 log "Analyzing source data. This may take a moment for millions of files..."
 FILE_COUNT=$(find "$SOURCE_DIR" -type f | wc -l)
@@ -169,11 +169,17 @@ SOURCE_GB=$(echo "scale=2; $SOURCE_KB / 1024 / 1024" | bc)
 NAS_KB_FREE=$(df -P "$NAS_MOUNT" | awk 'NR==2 {print $4}')
 NAS_GB_FREE=$(echo "scale=2; $NAS_KB_FREE / 1024 / 1024" | bc)
 
+# Calculate ETA assuming a conservative 60 MB/s (61440 KB/s) for mixed sizes over 1Gbps
+EST_SEC=$(( SOURCE_KB / 61440 ))
+EST_HOURS=$(( EST_SEC / 3600 ))
+EST_MIN=$(( (EST_SEC % 3600) / 60 ))
+
 echo -e "\n${CYAN}--- Initial Analysis ---${NC}"
 echo -e "Files:       $FILE_COUNT"
 echo -e "Directories: $DIR_COUNT"
 echo -e "Size:        ${SOURCE_GB} GB"
 echo -e "NAS Free:    ${NAS_GB_FREE} GB"
+echo -e "Est. Time:   ${YELLOW}${EST_HOURS}h ${EST_MIN}m${NC} (assuming ~60 MB/s avg speed)"
 
 if (( SOURCE_KB > NAS_KB_FREE )); then
     warn "NAS FREE SPACE IS LESS THAN SOURCE SIZE!"
@@ -238,11 +244,14 @@ if [[ "$run_sync" == "y" ]]; then
         PREFIX="ionice -c2 -n7 nice -n 19"
     fi
     
-    log "Starting initial sync... (Resume capable, auto-recovers NAS disconnects)"
+    log "Starting initial sync... You will see a live progress bar below."
+    log "If the NAS disconnects, the sync will safely pause and automatically retry."
+    
     while true; do
         if mountpoint -q "$NAS_MOUNT" && touch "$NAS_MOUNT/.write_test" 2>/dev/null; then
             rm -f "$NAS_MOUNT/.write_test"
             set +e
+            # --info=progress2 outputs an aggregate progress bar, speed, and ETA for the total transfer
             $PREFIX rsync -aHAX --numeric-ids --info=progress2 \
                 --exclude="*/node_modules/*" \
                 "$SOURCE_DIR/" "$SYNC_TARGET/"
