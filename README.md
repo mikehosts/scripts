@@ -9,7 +9,7 @@ Tailscale:
 
 
 Backups:
->```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/backup.sh)```
+>```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/backup2.sh)```
 
 setup ups:
 >```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/setup-ups.sh)```
