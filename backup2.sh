@@ -103,6 +103,7 @@ if [[ ! -d "$SOURCE_DIR" ]]; then err "Source directory $SOURCE_DIR does not exi
 
 read -p "NAS IP/Hostname: " NAS_HOST
 read -p "NAS Share Name (e.g., backups): " NAS_SHARE
+read -p "NAS Target Folder (e.g., node-01) [leave empty for root of share]: " NAS_FOLDER
 read -p "NAS SMB Username: " NAS_USER
 read -s -p "NAS SMB Password: " NAS_PASS; echo
 
@@ -140,9 +141,19 @@ rm -f "$NAS_MOUNT/.test_write"
 sed -i '\#ptero_nas#d' /etc/fstab
 echo "//$NAS_HOST/$NAS_SHARE $NAS_MOUNT cifs vers=$SMB_VERSION,credentials=$CRED_FILE,iocharset=utf8,noperm 0 0" >> /etc/fstab
 
+# Setup Sync Target Directory
+NAS_FOLDER=$(echo "$NAS_FOLDER" | sed -e 's/^\/*//' -e 's/\/*$//') # Strip leading/trailing slashes
+if [[ -n "$NAS_FOLDER" ]]; then
+    SYNC_TARGET="$NAS_MOUNT/$NAS_FOLDER"
+    log "Creating target folder on NAS: $NAS_FOLDER"
+    mkdir -p "$SYNC_TARGET"
+else
+    SYNC_TARGET="$NAS_MOUNT"
+fi
+
 # Check Existing Data
-if [[ -n "$(ls -A "$NAS_MOUNT" 2>/dev/null)" ]]; then
-    warn "Destination contains data."
+if [[ -d "$SYNC_TARGET" ]] && [[ -n "$(ls -A "$SYNC_TARGET" 2>/dev/null)" ]]; then
+    warn "Destination folder ($SYNC_TARGET) contains data."
     read -p "Continue anyway? (y/n): " cont
     if [[ "$cont" != "y" ]]; then umount "$NAS_MOUNT"; exit 1; fi
 fi
@@ -234,7 +245,7 @@ if [[ "$run_sync" == "y" ]]; then
             set +e
             $PREFIX rsync -aHAX --numeric-ids --info=progress2 \
                 --exclude="*/node_modules/*" \
-                "$SOURCE_DIR/" "$NAS_MOUNT/"
+                "$SOURCE_DIR/" "$SYNC_TARGET/"
             RSYNC_EXIT=$?
             set -e
             
@@ -260,12 +271,12 @@ fi
 log "Generating runtime scripts..."
 
 # 1. Rsync Wrapper (Handles real-time Deletes -> Moves to deleted/YYYY/MM/DD)
-cat << 'EOF' > "$RSYNC_WRAPPER"
+cat << EOF > "$RSYNC_WRAPPER"
 #!/bin/bash
-TODAY=$(date +%Y/%m/%d)
-BACKUP_DIR="/mnt/ptero_nas/deleted/$TODAY"
-mkdir -p "$BACKUP_DIR"
-exec /usr/bin/rsync --backup --backup-dir="$BACKUP_DIR" "$@"
+TODAY=\$(date +%Y/%m/%d)
+BACKUP_DIR="$SYNC_TARGET/deleted/\$TODAY"
+mkdir -p "\$BACKUP_DIR"
+exec /usr/bin/rsync --backup --backup-dir="\$BACKUP_DIR" "\$@"
 EOF
 chmod +x "$RSYNC_WRAPPER"
 
@@ -312,7 +323,7 @@ chmod +x "$WATCHDOG_SCRIPT"
 # 3. Retention Cleanup Script
 cat << EOF > "$RETENTION_SCRIPT"
 #!/bin/bash
-DEL_PATH="$NAS_MOUNT/deleted"
+DEL_PATH="$SYNC_TARGET/deleted"
 if [[ -d "\$DEL_PATH" ]]; then
     find "\$DEL_PATH" -type f -mtime +$RETENTION_DAYS -exec rm -f {} \;
     find "\$DEL_PATH" -type d -empty -delete 2>/dev/null
@@ -337,7 +348,7 @@ settings {
 sync {
     default.rsync,
     source = "$SOURCE_DIR",
-    target = "$NAS_MOUNT",
+    target = "$SYNC_TARGET",
     exclude = { "*/node_modules/*" },
     rsync = {
         binary = "$RSYNC_WRAPPER",
@@ -433,7 +444,7 @@ echo -e "${GREEN} Installation Complete!${NC}"
 echo -e "${GREEN}====================================================${NC}"
 echo -e "Lsyncd is now managed automatically by the watchdog."
 echo -e "If the NAS disconnects, sync pauses. When it returns, it resumes."
-echo -e "Deleted files are moved to: ${CYAN}$NAS_MOUNT/deleted/YYYY/MM/DD${NC}"
+echo -e "Deleted files are moved to: ${CYAN}$SYNC_TARGET/deleted/YYYY/MM/DD${NC}"
 echo -e "Root login notifications will alert you of failures."
 echo -e "\nMaintenance Commands:"
 echo -e "  ./install-pterodactyl-nas-sync.sh --status"
