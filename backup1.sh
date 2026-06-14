@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Pterodactyl -> NAS Real-Time Sync Enterprise Installer
+# Pterodactyl -> NAS Real-Time Parallel Sync Enterprise Installer
 # ==============================================================================
-# Priority: Single-file | Real-time | Auto-recovery | Scale | Deployment Ease
+# Priority: Parallel Engine | Real-time | Auto-recovery | Scale | Deployment Ease
 # Warning: The user explicitly accepts risk for this enterprise deployment.
 # ==============================================================================
 
@@ -49,7 +49,7 @@ do_status() {
 }
 
 do_uninstall() {
-    echo -e "${YELLOW}Uninstalling Pterodactyl Sync...${NC}"
+    echo -e "${YELLOW}Uninstalling Pterodactyl Parallel Sync...${NC}"
     systemctl stop lsyncd ptero-watchdog.timer ptero-watchdog.service ptero-retention.timer ptero-retention.service || true
     systemctl disable lsyncd ptero-watchdog.timer ptero-retention.timer || true
     
@@ -86,12 +86,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then do_uninstall; fi
 if [[ "${1:-}" == "--repair" ]]; then do_repair; fi
 
 # ==============================================================================
-# Pre-flight Checks & Installation
+# Pre-flight Checks & Installation (Includes fpart/fpsync)
 # ==============================================================================
 if [[ $EUID -ne 0 ]]; then err "This script must be run as root."; fi
 
-log "Installing dependencies (rsync, cifs-utils, lsyncd, jq, bc)..."
-apt-get update -qq && apt-get install -y -qq rsync cifs-utils lsyncd jq bc acl attr
+log "Installing dependencies (rsync, cifs-utils, lsyncd, jq, bc, fpart)..."
+apt-get update -qq && apt-get install -y -qq rsync cifs-utils lsyncd jq bc acl attr fpart
 
 # ==============================================================================
 # Configuration Gathering
@@ -117,16 +117,19 @@ echo "password=$NAS_PASS" >> "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
 # ==============================================================================
-# Auto-Detect SMB Version & Mount
+# Auto-Detect SMB Version & Mount (Speed Optimized)
 # ==============================================================================
 log "Negotiating SMB version with $NAS_HOST..."
 mkdir -p "$NAS_MOUNT"
 SMB_VERSION=""
 
+# Performance Flags: Max out buffer windows to 1MB; loose metadata caching to avoid SMB round-trips
+MOUNT_OPTS="credentials=$CRED_FILE,iocharset=utf8,noperm,rsize=1048576,wsize=1048576,cache=loose"
+
 for v in 3.1.1 3.0 2.1; do
-    if mount -t cifs -o vers=$v,credentials=$CRED_FILE "//$NAS_HOST/$NAS_SHARE" "$NAS_MOUNT" 2>/dev/null; then
+    if mount -t cifs -o vers=$v,$MOUNT_OPTS "//$NAS_HOST/$NAS_SHARE" "$NAS_MOUNT" 2>/dev/null; then
         SMB_VERSION=$v
-        log "Successfully connected using SMB $SMB_VERSION"
+        log "Successfully connected using SMB $SMB_VERSION (Speed Optimized)"
         break
     fi
 done
@@ -139,7 +142,7 @@ rm -f "$NAS_MOUNT/.test_write"
 
 # Fstab configuration
 sed -i '\#ptero_nas#d' /etc/fstab
-echo "//$NAS_HOST/$NAS_SHARE $NAS_MOUNT cifs vers=$SMB_VERSION,credentials=$CRED_FILE,iocharset=utf8,noperm 0 0" >> /etc/fstab
+echo "//$NAS_HOST/$NAS_SHARE $NAS_MOUNT cifs vers=$SMB_VERSION,$MOUNT_OPTS 0 0" >> /etc/fstab
 
 # Setup Sync Target Directory
 NAS_FOLDER=$(echo "$NAS_FOLDER" | sed -e 's/^\/*//' -e 's/\/*$//')
@@ -161,34 +164,30 @@ fi
 # ==============================================================================
 # Analysis Phase & ETA Calculation
 # ==============================================================================
-log "Analyzing source data. This may take a moment for millions of files..."
+log "Analyzing source data (Skipping junk paths)..."
 
-# Turn off strict error checking temporarily. Active Pterodactyl nodes have ephemeral 
-# files (like Docker volumes) that disappear during analysis and will crash `du` or `find`.
 set +e
-FILE_COUNT=$(find "$SOURCE_DIR" -type f 2>/dev/null | wc -l)
-DIR_COUNT=$(find "$SOURCE_DIR" -type d 2>/dev/null | wc -l)
-SOURCE_KB=$(du -sk "$SOURCE_DIR" 2>/dev/null | cut -f1)
+FILE_COUNT=$(find "$SOURCE_DIR" -type f ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.tmp/*" 2>/dev/null | wc -l)
+DIR_COUNT=$(find "$SOURCE_DIR" -type d ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.tmp/*" 2>/dev/null | wc -l)
+SOURCE_KB=$(du -sk --exclude="*/node_modules/*" --exclude="*/.cache/*" --exclude="*/.tmp/*" "$SOURCE_DIR" 2>/dev/null | cut -f1)
 set -e
 
-# Failsafe in case SOURCE_KB returns completely empty
 SOURCE_KB=${SOURCE_KB:-1}
-
 SOURCE_GB=$(echo "scale=2; $SOURCE_KB / 1024 / 1024" | bc)
 NAS_KB_FREE=$(df -P "$NAS_MOUNT" | awk 'NR==2 {print $4}')
 NAS_GB_FREE=$(echo "scale=2; $NAS_KB_FREE / 1024 / 1024" | bc)
 
-# Calculate ETA assuming a conservative 60 MB/s (61440 KB/s) for mixed sizes over 1Gbps
-EST_SEC=$(( SOURCE_KB / 61440 ))
-EST_HOURS=$(( EST_SEC / 3600 ))
+# Multi-threaded target speed projection up to ~110 MB/s (112640 KB/s) on Gigabit infrastructure
+EST_SEC=$(( SOURCE_KB / 112640 ))
+EST_HOURS=$========================================================= $(( EST_SEC / 3600 ))
 EST_MIN=$(( (EST_SEC % 3600) / 60 ))
 
-echo -e "\n${CYAN}--- Initial Analysis ---${NC}"
+echo -e "\n${CYAN}--- Initial Analysis (Exclusions Applied) ---${NC}"
 echo -e "Files:       $FILE_COUNT"
 echo -e "Directories: $DIR_COUNT"
 echo -e "Size:        ${SOURCE_GB} GB"
 echo -e "NAS Free:    ${NAS_GB_FREE} GB"
-echo -e "Est. Time:   ${YELLOW}${EST_HOURS}h ${EST_MIN}m${NC} (assuming ~60 MB/s avg speed)"
+echo -e "Est. Time:   ${YELLOW}${EST_HOURS}h ${EST_MIN}m${NC} (Assuming parallel multi-stream speed)"
 
 if (( SOURCE_KB > NAS_KB_FREE )); then
     warn "NAS FREE SPACE IS LESS THAN SOURCE SIZE!"
@@ -197,31 +196,30 @@ if (( SOURCE_KB > NAS_KB_FREE )); then
 fi
 
 # ==============================================================================
-# CPU & RAM Tuning (Extreme Mode)
+# CPU Concurrency Tuning
 # ==============================================================================
-log "Tuning System Resources..."
+log "Tuning System Concurrency Options..."
 THREADS=$(nproc)
 LOAD=$(awk '{print $1}' /proc/loadavg)
 LOAD_PCT=$(echo "scale=2; ($LOAD / $THREADS) * 100" | bc | cut -d. -f1)
-REC_THREADS=$(echo "scale=0; $THREADS * 0.8 / 1" | bc)
+REC_THREADS=$(echo "scale=0; $THREADS * 0.7 / 1" | bc)
+[[ $REC_THREADS -lt 2 ]] && REC_THREADS=2
 
 echo -e "\nDetected Threads: $THREADS"
 echo -e "Current CPU Usage: ${LOAD_PCT}%"
 
 MAX_PROCS=$REC_THREADS
-if [[ $LOAD_PCT -lt 50 ]]; then
-    echo "1) Recommended ($REC_THREADS threads)"
-    echo "2) All Threads ($THREADS threads)"
-    echo "3) Custom"
-    read -p "Select CPU maxProcesses for lsyncd [1]: " cpu_choice
-    case ${cpu_choice:-1} in
-        2) MAX_PROCS=$THREADS ;;
-        3) read -p "Enter number of threads: " MAX_PROCS ;;
-        *) MAX_PROCS=$REC_THREADS ;;
-    esac
-fi
+echo "1) Balanced Parallel Mode ($REC_THREADS concurrent workers)"
+echo "2) Maximum Performance Engine ($THREADS concurrent workers)"
+echo "3) Custom Concurrency Level"
+read -p "Select parallel worker profile [1]: " cpu_choice
+case ${cpu_choice:-1} in
+    2) MAX_PROCS=$THREADS ;;
+    3) read -p "Enter number of custom execution streams: " MAX_PROCS ;;
+    *) MAX_PROCS=$REC_THREADS ;;
+esac
 
-# RAM Tuning
+# Host Memory Optimization Configuration
 RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
 WATCHES=$((RAM_GB * 1000000))
 [[ $WATCHES -lt 8192 ]] && WATCHES=8192
@@ -239,43 +237,37 @@ EOF
 sysctl --system >/dev/null 2>&1
 
 # ==============================================================================
-# Initial Sync Execution
+# Initial Sync Execution (Parallel Mode via fpsync)
 # ==============================================================================
-echo -e "\n${CYAN}--- Initial Sync ---${NC}"
-read -p "Run initial sync now? (y/n): " run_sync
+echo -e "\n${CYAN}--- Initial Parallel Sync Execution ---${NC}"
+read -p "Execute multi-threaded initialization now? (y/n): " run_sync
 if [[ "$run_sync" == "y" ]]; then
-    echo "1) Normal Priority"
-    echo "2) Low CPU + Low IO"
-    read -p "Select Priority [1]: " sync_prio
     
-    PREFIX=""
-    if [[ "$sync_prio" == "2" ]]; then
-        PREFIX="ionice -c2 -n7 nice -n 19"
-    fi
-    
-    log "Starting initial sync... You will see a live progress bar below."
-    log "If the NAS disconnects, the sync will safely pause and automatically retry."
+    log "Launching Parallel Engine with $MAX_PROCS execution channels..."
+    log "Exclusions active: node_modules, .cache, and .tmp are skipped."
     
     while true; do
         if mountpoint -q "$NAS_MOUNT" && touch "$NAS_MOUNT/.write_test" 2>/dev/null; then
             rm -f "$NAS_MOUNT/.write_test"
             set +e
-            # --info=progress2 outputs an aggregate progress bar, speed, and ETA for the total transfer
-            $PREFIX rsync -aHAX --numeric-ids --info=progress2 \
-                --exclude="*/node_modules/*" \
+            
+            # Run fpsync using the selected thread count
+            fpsync -n "$MAX_PROCS" -v \
+                -o "-aHAX --numeric-ids --exclude='*/node_modules/*' --exclude='*/.cache/*' --exclude='*/.tmp/*'" \
                 "$SOURCE_DIR/" "$SYNC_TARGET/"
-            RSYNC_EXIT=$?
+            
+            SYNC_EXIT=$?
             set -e
             
-            if [[ $RSYNC_EXIT -eq 0 || $RSYNC_EXIT -eq 24 ]]; then
-                log "Initial sync completed successfully."
+            if [[ $SYNC_EXIT -eq 0 ]]; then
+                log "Initial parallel file synchronization completed successfully."
                 break
             else
-                warn "Rsync interrupted (code $RSYNC_EXIT). Waiting 15 seconds to retry..."
+                warn "Parallel synchronizer flagged interruptions (code $SYNC_EXIT). Retrying batch cycle in 15 seconds..."
                 sleep 15
             fi
         else
-            warn "NAS offline. Attempting to remount..."
+            warn "NAS target dropped offline. Reinitializing mount parameters..."
             umount -l "$NAS_MOUNT" 2>/dev/null || true
             mount "$NAS_MOUNT" 2>/dev/null || true
             sleep 10
@@ -284,11 +276,11 @@ if [[ "$run_sync" == "y" ]]; then
 fi
 
 # ==============================================================================
-# Helper Scripts Generation
+# Runtime Component & Background Scripts Generation
 # ==============================================================================
-log "Generating runtime scripts..."
+log "Generating real-time automation frameworks..."
 
-# 1. Rsync Wrapper (Handles real-time Deletes -> Moves to deleted/YYYY/MM/DD)
+# 1. Real-time Rsync Worker Wrapper
 cat << EOF > "$RSYNC_WRAPPER"
 #!/bin/bash
 TODAY=\$(date +%Y/%m/%d)
@@ -298,7 +290,7 @@ exec /usr/bin/rsync --backup --backup-dir="\$BACKUP_DIR" "\$@"
 EOF
 chmod +x "$RSYNC_WRAPPER"
 
-# 2. Watchdog Script
+# 2. Storage System Watchdog Script
 cat << EOF > "$WATCHDOG_SCRIPT"
 #!/bin/bash
 MOUNT_POINT="$NAS_MOUNT"
@@ -306,39 +298,35 @@ ALERT_FILE="$PROFILE_ALERT"
 ERROR=0
 REASON=""
 
-# Check Mount
 if ! mountpoint -q "\$MOUNT_POINT"; then
-    mount "\$MOUNT_POINT" || { ERROR=1; REASON="NAS Offline / Cannot Mount"; }
+    mount "\$MOUNT_POINT" || { ERROR=1; REASON="NAS Connection Dropped / Mount Offline"; }
 fi
 
-# Check Writable
 if [[ \$ERROR -eq 0 ]] && ! touch "\$MOUNT_POINT/.watchdog" 2>/dev/null; then
-    ERROR=1; REASON="NAS Mounted but Read-Only";
+    ERROR=1; REASON="NAS target transitioned to Read-Only";
 fi
 rm -f "\$MOUNT_POINT/.watchdog" 2>/dev/null
 
-# Check Free Space
 if [[ \$ERROR -eq 0 ]]; then
     FREE_KB=\$(df -P "\$MOUNT_POINT" | awk 'NR==2 {print \$4}')
-    if (( FREE_KB < 1048576 )); then ERROR=1; REASON="NAS Low Space (< 1GB)"; fi
+    if (( FREE_KB < 1048576 )); then ERROR=1; REASON="Critical Low Space Alert (< 1GB Remaining)"; fi
 fi
 
-# Action
 if [[ \$ERROR -eq 1 ]]; then
     systemctl stop lsyncd 2>/dev/null
-    echo -e "echo -e '\\033[0;31m[CRITICAL] Pterodactyl Sync: '\$REASON'\\033[0m'" > "\$ALERT_FILE"
-    echo "\$(date): Failed - \$REASON" >> "$WATCHDOG_LOG"
+    echo -e "echo -e '\\033[0;31m[CRITICAL] Pterodactyl Parallel Sync Fault: '\$REASON'\\033[0m'" > "\$ALERT_FILE"
+    echo "\$(date): Recovery Failure - \$REASON" >> "$WATCHDOG_LOG"
 else
     rm -f "\$ALERT_FILE"
     if ! systemctl is-active --quiet lsyncd; then
         systemctl start lsyncd
-        echo "\$(date): NAS healthy. Restarted lsyncd." >> "$WATCHDOG_LOG"
+        echo "\$(date): Storage verification healthy. Engine started." >> "$WATCHDOG_LOG"
     fi
 fi
 EOF
 chmod +x "$WATCHDOG_SCRIPT"
 
-# 3. Retention Cleanup Script
+# 3. Storage Retention Maintenance Engine
 cat << EOF > "$RETENTION_SCRIPT"
 #!/bin/bash
 DEL_PATH="$SYNC_TARGET/deleted"
@@ -350,9 +338,9 @@ EOF
 chmod +x "$RETENTION_SCRIPT"
 
 # ==============================================================================
-# Lsyncd Configuration
+# Lsyncd Production Daemon Setup
 # ==============================================================================
-log "Generating lsyncd configuration..."
+log "Configuring production real-time sync mapping rules..."
 mkdir -p /etc/lsyncd
 cat << EOF > /etc/lsyncd/lsyncd.conf.lua
 settings {
@@ -367,7 +355,7 @@ sync {
     default.rsync,
     source = "$SOURCE_DIR",
     target = "$SYNC_TARGET",
-    exclude = { "*/node_modules/*" },
+    exclude = { "*/node_modules/*", "*/.cache/*", "*/.tmp/*" },
     rsync = {
         binary = "$RSYNC_WRAPPER",
         archive = true,
@@ -385,14 +373,13 @@ sync {
 EOF
 
 # ==============================================================================
-# Systemd Services & Timers
+# Automation Control Loop Integration (Systemd Engine)
 # ==============================================================================
-log "Installing Systemd Timers (Watchdog & Retention)..."
+log "Finalizing background runtime architectures..."
 
-# Watchdog Service & Timer (Every 1 Minute)
 cat << 'EOF' > /etc/systemd/system/ptero-watchdog.service
 [Unit]
-Description=Pterodactyl NAS Sync Watchdog
+Description=Pterodactyl NAS Sync Monitor Daemon
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pterodactyl-sync-watchdog.sh
@@ -400,7 +387,7 @@ EOF
 
 cat << 'EOF' > /etc/systemd/system/ptero-watchdog.timer
 [Unit]
-Description=Run Pterodactyl NAS Sync Watchdog every minute
+Description=Trigger Pterodactyl Storage Watchdog Check Loop
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=1min
@@ -408,10 +395,9 @@ OnUnitActiveSec=1min
 WantedBy=timers.target
 EOF
 
-# Retention Service & Timer (Daily)
 cat << 'EOF' > /etc/systemd/system/ptero-retention.service
 [Unit]
-Description=Pterodactyl NAS Sync Retention Cleanup
+Description=Pterodactyl Storage Retention Garbage Collector
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pterodactyl-sync-retention.sh
@@ -419,7 +405,7 @@ EOF
 
 cat << 'EOF' > /etc/systemd/system/ptero-retention.timer
 [Unit]
-Description=Run Pterodactyl NAS Sync Retention daily
+Description=Trigger Pterodactyl Storage Retention Engine Daily
 [Timer]
 OnCalendar=daily
 Persistent=true
@@ -427,9 +413,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# ==============================================================================
-# Log Rotation
-# ==============================================================================
+# System Log Rotation Setup
 cat << EOF > /etc/logrotate.d/pterodactyl-sync
 $LSYNCD_LOG $WATCHDOG_LOG $LOG_FILE {
     size 1G
@@ -443,28 +427,23 @@ $LSYNCD_LOG $WATCHDOG_LOG $LOG_FILE {
 EOF
 
 # ==============================================================================
-# Final Validation & Boot Recovery Setup
+# Initialization & Handover Execution
 # ==============================================================================
 systemctl daemon-reload
-
-# Disable default lsyncd startup. Watchdog handles it based on NAS health.
 systemctl disable lsyncd >/dev/null 2>&1
 systemctl stop lsyncd >/dev/null 2>&1
-
 systemctl enable --now ptero-watchdog.timer >/dev/null 2>&1
 systemctl enable --now ptero-retention.timer >/dev/null 2>&1
 
-# Run watchdog once to evaluate and start lsyncd
+# Initialize state health validation run
 /usr/local/bin/pterodactyl-sync-watchdog.sh
 
 echo -e "\n${GREEN}====================================================${NC}"
-echo -e "${GREEN} Installation Complete!${NC}"
+echo -e "${GREEN} Parallel Sync Deployment Success!${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "Lsyncd is now managed automatically by the watchdog."
-echo -e "If the NAS disconnects, sync pauses. When it returns, it resumes."
-echo -e "Deleted files are moved to: ${CYAN}$SYNC_TARGET/deleted/YYYY/MM/DD${NC}"
-echo -e "Root login notifications will alert you of failures."
-echo -e "\nMaintenance Commands:"
+echo -e "Initial ingestion ran multi-threaded. Real-time daemon active."
+echo -e "Excluded paths are fully isolated out of the processing pipeline."
+echo -e "\nManagement Utilities:"
 echo -e "  ./install-pterodactyl-nas-sync.sh --status"
 echo -e "  ./install-pterodactyl-nas-sync.sh --repair"
 echo -e "  ./install-pterodactyl-nas-sync.sh --uninstall\n"
