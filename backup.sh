@@ -111,9 +111,11 @@ echo -e "\n${CYAN}--- Settings ---${NC}"
 read -p "Retention days for deleted files [14]: " RETENTION_DAYS
 RETENTION_DAYS=${RETENTION_DAYS:-14}
 
-# Create Credentials
-echo "username=$NAS_USER" > "$CRED_FILE"
-echo "password=$NAS_PASS" >> "$CRED_FILE"
+# Create Credentials File Safely
+cat << EOF > "$CRED_FILE"
+username=${NAS_USER}
+password=${NAS_PASS}
+EOF
 chmod 600 "$CRED_FILE"
 
 # ==============================================================================
@@ -177,9 +179,9 @@ SOURCE_GB=$(echo "scale=2; $SOURCE_KB / 1024 / 1024" | bc)
 NAS_KB_FREE=$(df -P "$NAS_MOUNT" | awk 'NR==2 {print $4}')
 NAS_GB_FREE=$(echo "scale=2; $NAS_KB_FREE / 1024 / 1024" | bc)
 
-# Multi-threaded target speed projection up to ~110 MB/s (112640 KB/s) on Gigabit infrastructure
+# Multi-threaded target speed projection up to ~110 MB/s (112640 KB/s) on配置
 EST_SEC=$(( SOURCE_KB / 112640 ))
-EST_HOURS=$========================================================= $(( EST_SEC / 3600 ))
+EST_HOURS=$(( EST_SEC / 3600 ))
 EST_MIN=$(( (EST_SEC % 3600) / 60 ))
 
 echo -e "\n${CYAN}--- Initial Analysis (Exclusions Applied) ---${NC}"
@@ -441,10 +443,4 @@ systemctl enable --now ptero-retention.timer >/dev/null 2>&1
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN} Parallel Sync Deployment Success!${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "Initial ingestion ran multi-threaded. Real-time daemon active."
-echo -e "Excluded paths are fully isolated out of the processing pipeline."
-echo -e "\nManagement Utilities:"
-echo -e "  ./install-pterodactyl-nas-sync.sh --status"
-echo -e "  ./install-pterodactyl-nas-sync.sh --repair"
-echo -e "  ./install-pterodactyl-nas-sync.sh --uninstall\n"
 exit 0
