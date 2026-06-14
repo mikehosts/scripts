@@ -8,8 +8,8 @@ Tailscale:
 >```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/main/tailscale.sh)```
 
 
-Monitor:
->```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/monitor2.sh)```
+Backups:
+>```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/backup.sh)```
 
 setup ups:
 >```bash <(curl -s https://raw.githubusercontent.com/mikehosts/scripts/refs/heads/main/setup-ups.sh)```
